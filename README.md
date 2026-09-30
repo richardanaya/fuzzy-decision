@@ -158,6 +158,10 @@ choice(
 
 `decide_map` takes a `BTreeMap<String, Question>` and returns a `BTreeMap<String, Answer>` with the same keys. Map order is sorted by key, and that sorted order is the order the questions are packed.
 
+## Domain eval
+
+`cargo run --release --example domain_eval` loads `models/kev-4b` and scores a fixed set of professional and everyday classification questions: message intent, document topic, whether a statement follows from a memo, abstaining when the label set does not apply, which team owns a request, expense category, on-call urgency, and sentiment. The latest run is the report in [index.html](index.html): 30 of 32 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
+
 ## Limits
 
 The state, including its delimiter token, can be at most **8192** tokens. The state plus any one question (instructions, options, and the decide token) can also be at most **8192** tokens. Positions start again at the beginning of each question, after the shared state.

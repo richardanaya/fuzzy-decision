@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fuzzy-decision classification report</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Georgia, "Iowan Old Style", serif; max-width: 58rem; margin: 2.5rem auto 4rem; padding: 0 1.4rem; color: #1c1a17; background: #f6f3ed; line-height: 1.5; }
+    header { border-bottom: 1px solid #d9d0c3; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+    h1 { font-size: 1.9rem; font-weight: 600; margin: 0 0 0.3rem; }
+    h2 { font-size: 1.25rem; margin: 2rem 0 0.6rem; }
+    p { margin: 0.6rem 0; }
+    .meta { color: #5c564c; }
+    .figure { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 2.4rem; font-weight: 600; letter-spacing: -0.03em; margin: 0.2rem 0; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1rem; background: #fff; }
+    th, td { text-align: left; padding: 0.45rem 0.55rem; border-bottom: 1px solid #e4ddd2; vertical-align: top; }
+    th { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: #5c564c; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .hit { color: #1d6b3a; }
+    .miss { color: #9a3412; font-weight: 600; }
+    code { font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.92em; }
+    .bar { height: 0.5rem; background: #efe8dc; border-radius: 99px; overflow: hidden; min-width: 5.5rem; }
+    .bar > span { display: block; height: 100%; background: #2f5d50; }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="meta">fuzzy-decision &nbsp;·&nbsp; classification report &nbsp;·&nbsp; 2026-09-29</p>
+    <h1>How Kev-4B does on ordinary classification</h1>
+    <p class="figure">30 / 32 &nbsp; <span class="meta">94%</span></p>
+    <p>Each item is a short workplace or everyday text, one question, and a closed set of answers. The model must pick from that set. It does not write a free-form answer.</p>
+  </header>
+
+  <h2>What was measured</h2>
+  <p>The checkpoint is the Kev-4B Qwen3 revision, loaded from <code>models/kev-4b</code>. Eight domains, four items each. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items (priority and sentiment) count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
+  <p>The domains are message intent, document topic, whether a statement follows from a memo, refusing a label set that does not apply, which team owns a request, expense category, on-call urgency, and how positive a message is.</p>
+
+  <h2>Results by domain</h2>
+  <table>
+    <thead>
+      <tr><th>Domain</th><th class="num">Items</th><th class="num">Hits</th><th class="num">Accuracy</th><th></th><th class="num">Mean confidence</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>abstain</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.99</td></tr>
+<tr><td>entailment</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.88</td></tr>
+<tr><td>expense</td><td class="num">4</td><td class="num">3</td><td class="num">0.75</td><td><div class="bar"><span style="width:75%"></span></div></td><td class="num">0.82</td></tr>
+<tr><td>intent</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.87</td></tr>
+<tr><td>priority</td><td class="num">4</td><td class="num">3</td><td class="num">0.75</td><td><div class="bar"><span style="width:75%"></span></div></td><td class="num">0.50</td></tr>
+<tr><td>routing</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.78</td></tr>
+<tr><td>sentiment</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.79</td></tr>
+<tr><td>topic</td><td class="num">4</td><td class="num">4</td><td class="num">1.00</td><td><div class="bar"><span style="width:100%"></span></div></td><td class="num">0.97</td></tr>
+
+      <tr><td><strong>Overall</strong></td><td class="num"><strong>32</strong></td><td class="num"><strong>30</strong></td><td class="num"><strong>0.94</strong></td><td><div class="bar"><span style="width:94%"></span></div></td><td class="num"></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Where it missed</h2>
+  <table>
+    <thead>
+      <tr><th>Domain</th><th>Text</th><th>Question</th><th>Labeled</th><th>Selected</th><th class="num">Confidence</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>expense</td><td>Team lunch after the customer workshop, $96 including tip.</td><td>Which expense category is this?</td><td>meals</td><td class="miss">none</td><td class="num">0.70</td></tr>
+<tr><td>priority</td><td>A typo in the footer of the monthly newsletter. The send already went out.</td><td>How urgent is this for the on-call team?</td><td>low</td><td class="miss">medium (1.15)</td><td class="num">0.49</td></tr>
+
+    </tbody>
+  </table>
+
+  <h2>Every item</h2>
+  <table>
+    <thead>
+      <tr><th></th><th>Domain</th><th>Text</th><th>Question</th><th>Labeled</th><th>Selected</th><th class="num">Confidence</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="hit">hit</td><td>intent</td><td>Can we move Thursday's budget review to Friday at 2pm? I have a client call.</td><td>What is the sender trying to do?</td><td>reschedule a meeting</td><td>reschedule a meeting</td><td class="num">0.96</td></tr>
+<tr><td class="hit">hit</td><td>intent</td><td>The staging deploy finished. Error rate is flat and the new login page is up.</td><td>What is the sender trying to do?</td><td>share a status update</td><td>share a status update</td><td class="num">0.91</td></tr>
+<tr><td class="hit">hit</td><td>intent</td><td>Please send me the signed statement of work before the kickoff.</td><td>What is the sender trying to do?</td><td>request a document</td><td>request a document</td><td class="num">0.92</td></tr>
+<tr><td class="hit">hit</td><td>intent</td><td>Thanks for the intro. I will read the brief this afternoon.</td><td>What is the sender trying to do?</td><td>acknowledge a message</td><td>acknowledge a message</td><td class="num">0.69</td></tr>
+<tr><td class="hit">hit</td><td>topic</td><td>Q3 revenue was $4.2 million, up 6% from Q2. Gross margin held at 41%.</td><td>Which subject is this paragraph about?</td><td>finance</td><td>finance</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>topic</td><td>We are opening a senior accountant role. Applications close on the 15th.</td><td>Which subject is this paragraph about?</td><td>hiring</td><td>hiring</td><td class="num">0.94</td></tr>
+<tr><td class="hit">hit</td><td>topic</td><td>The HVAC unit on the third floor failed overnight. The floor is closed until noon.</td><td>Which subject is this paragraph about?</td><td>facilities</td><td>facilities</td><td class="num">0.98</td></tr>
+<tr><td class="hit">hit</td><td>topic</td><td>Customers cannot export CSV from the reports page after yesterday's release.</td><td>Which subject is this paragraph about?</td><td>product support</td><td>product support</td><td class="num">0.98</td></tr>
+<tr><td class="hit">hit</td><td>entailment</td><td>The contract renews on June 1 unless either party gives 30 days' written notice. No notice has been sent.</td><td>The contract is set to renew on June 1.</td><td>true</td><td>true</td><td class="num">0.66</td></tr>
+<tr><td class="hit">hit</td><td>entailment</td><td>The contract renews on June 1 unless either party gives 30 days' written notice. No notice has been sent.</td><td>A party has already cancelled the renewal.</td><td>false</td><td>false</td><td class="num">0.95</td></tr>
+<tr><td class="hit">hit</td><td>entailment</td><td>Only managers in the payroll group can approve overtime. Jordan is a designer and is not in that group.</td><td>Jordan can approve overtime.</td><td>false</td><td>false</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>entailment</td><td>The vendor delivered 80 of the 100 chairs. The remaining 20 ship next Tuesday.</td><td>Some of the chairs have not arrived yet.</td><td>true</td><td>true</td><td class="num">0.91</td></tr>
+<tr><td class="hit">hit</td><td>abstain</td><td>Please book a conference room for six people on Monday morning.</td><td>Which payroll action is requested? Choose none if the text is not a payroll action.</td><td>none</td><td>none</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>abstain</td><td>The cafeteria serves soup on Wednesdays.</td><td>Which legal filing does the text request? Choose none if it requests none.</td><td>none</td><td>none</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>abstain</td><td>Please correct the tax withholding on my August paycheck.</td><td>Which payroll action is requested? Choose none if the text is not a payroll action.</td><td>correct a tax withholding</td><td>correct a tax withholding</td><td class="num">0.98</td></tr>
+<tr><td class="hit">hit</td><td>abstain</td><td>Attached is the agenda for the design critique.</td><td>Which facilities request is this? Choose none if it is not a facilities request.</td><td>none</td><td>none</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>routing</td><td>I was billed twice for the April invoice and I want the duplicate charge returned.</td><td>Which team should own this message?</td><td>billing</td><td>billing</td><td class="num">0.76</td></tr>
+<tr><td class="hit">hit</td><td>routing</td><td>I cannot sign in. The password reset email never arrives.</td><td>Which team should own this message?</td><td>account access</td><td>account access</td><td class="num">0.65</td></tr>
+<tr><td class="hit">hit</td><td>routing</td><td>The tracking page still shows my order sitting at the warehouse from last week.</td><td>Which team should own this message?</td><td>shipping</td><td>shipping</td><td class="num">0.72</td></tr>
+<tr><td class="hit">hit</td><td>routing</td><td>What time does the downtown shop close on Sundays?</td><td>Which team should own this message? Choose none if none of these teams own it.</td><td>none</td><td>none</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>expense</td><td>Uber from the airport to the client office, $46, March 2.</td><td>Which expense category is this?</td><td>ground transport</td><td>ground transport</td><td class="num">0.96</td></tr>
+<tr><td class="hit">hit</td><td>expense</td><td>Two nights at the Harbor Hotel during the Seattle offsite, $380.</td><td>Which expense category is this?</td><td>lodging</td><td>lodging</td><td class="num">1.00</td></tr>
+<tr><td class="hit">hit</td><td>expense</td><td>Annual seat for the design tool, billed to the company card.</td><td>Which expense category is this?</td><td>software</td><td>software</td><td class="num">0.63</td></tr>
+<tr><td class="miss">miss</td><td>expense</td><td>Team lunch after the customer workshop, $96 including tip.</td><td>Which expense category is this?</td><td>meals</td><td>none</td><td class="num">0.70</td></tr>
+<tr><td class="miss">miss</td><td>priority</td><td>A typo in the footer of the monthly newsletter. The send already went out.</td><td>How urgent is this for the on-call team?</td><td>low</td><td>medium (1.15)</td><td class="num">0.49</td></tr>
+<tr><td class="hit">hit</td><td>priority</td><td>Checkout has failed for every customer for the last 40 minutes. No orders are completing.</td><td>How urgent is this for the on-call team?</td><td>urgent</td><td>urgent (2.61)</td><td class="num">0.62</td></tr>
+<tr><td class="hit">hit</td><td>priority</td><td>Search is slow for some users, about three seconds, and results are still correct.</td><td>How urgent is this for the on-call team?</td><td>medium</td><td>medium (0.80)</td><td class="num">0.44</td></tr>
+<tr><td class="hit">hit</td><td>priority</td><td>New signups in one region are erroring. Other regions are fine. Support volume is rising.</td><td>How urgent is this for the on-call team?</td><td>high</td><td>high (2.25)</td><td class="num">0.46</td></tr>
+<tr><td class="hit">hit</td><td>sentiment</td><td>This is the clearest onboarding I have used. I had my team invited the same day.</td><td>How positive is this message?</td><td>very positive</td><td>very positive (3.77)</td><td class="num">0.77</td></tr>
+<tr><td class="hit">hit</td><td>sentiment</td><td>Support never replied, and the invoice was wrong for the second month in a row.</td><td>How positive is this message?</td><td>very negative</td><td>very negative (0.28)</td><td class="num">0.72</td></tr>
+<tr><td class="hit">hit</td><td>sentiment</td><td>The office address is 400 Market Street. Reception is on the second floor.</td><td>How positive is this message?</td><td>neutral</td><td>neutral (2.21)</td><td class="num">0.79</td></tr>
+<tr><td class="hit">hit</td><td>sentiment</td><td>The workshop was useful. The room was crowded, but the material was solid.</td><td>How positive is this message?</td><td>positive</td><td>positive (3.09)</td><td class="num">0.87</td></tr>
+
+    </tbody>
+  </table>
+</body>
+</html>
