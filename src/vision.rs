@@ -3,6 +3,7 @@
 //! The caller places the snapshot in a directory. This module does not download it.
 //! The trunk is Qwen3.5-4B with its vision tower. `head.pt` scores every option in one pass.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -116,6 +117,29 @@ struct Store {
     left: HashMap<String, usize>,
 }
 
+struct CachedPrefix {
+    stamp: u64,
+    prefix_len: usize,
+    carries: Vec<Carry>,
+}
+
+enum Carry {
+    Linear { mixed_tail: Vec<f32>, state: Vec<f32> },
+    Full { k: Tensor<Wgpu, 3>, v: Tensor<Wgpu, 3> },
+}
+
+impl Clone for Carry {
+    fn clone(&self) -> Self {
+        match self {
+            Carry::Linear { mixed_tail, state } => Carry::Linear {
+                mixed_tail: mixed_tail.clone(),
+                state: state.clone(),
+            },
+            Carry::Full { k, v } => Carry::Full { k: k.clone(), v: v.clone() },
+        }
+    }
+}
+
 pub struct VisionDecision {
     tokenizer: Tokenizer,
     device: WgpuDevice,
@@ -129,6 +153,7 @@ pub struct VisionDecision {
     merger: Merger,
     head_w: Vec<f32>,
     head_b: f32,
+    prefix: RefCell<Option<CachedPrefix>>,
 }
 
 impl VisionDecision {
@@ -242,6 +267,7 @@ impl VisionDecision {
             merger,
             head_w,
             head_b,
+            prefix: RefCell::new(None),
         })
     }
 
@@ -336,20 +362,28 @@ impl VisionDecision {
         let image_at = ids.iter().position(|id| *id == IMAGE_PAD).ok_or_else(|| Error::Weights {
             message: "prompt is missing image tokens".into(),
         })?;
-        let rows = self.see(&pixels, grid_h, grid_w);
-        let hidden = self.forward(&ids, image_at, n_image, grid_h, grid_w, &rows);
-        let data = hidden.into_data();
-        let values = data.as_slice::<f32>().unwrap();
-        let mut logits = Vec::with_capacity(slots.len());
-        for slot in slots {
-            let mut logit = self.head_b;
-            let row = slot * TEXT_HIDDEN;
-            for dim in 0..TEXT_HIDDEN {
-                logit += values[row + dim] * self.head_w[dim];
-            }
-            logits.push(logit);
-        }
-        Ok(logits)
+        let prefix_len = 1 + n_image + 1 + if state.is_empty() { 0 } else { self.encode(state).len() };
+        let stamp = image_stamp(image, state);
+        let hit = self.prefix.borrow().as_ref().and_then(|cached| {
+            (cached.stamp == stamp && cached.prefix_len == prefix_len).then(|| cached.carries.clone())
+        });
+        let carries = if let Some(carries) = hit {
+            carries
+        } else {
+            let rows = self.see(&pixels, grid_h, grid_w);
+            let prefix_ids = &ids[..prefix_len];
+            let hidden = self.splice_image(self.embed_ids(prefix_ids), image_at, n_image, &rows);
+            let (cos, sin) = text_mrope(&ids, image_at, n_image, grid_h, grid_w, &self.device);
+            let (_, carries) = self.run(hidden, &cos.narrow(0, 0, prefix_len), &sin.narrow(0, 0, prefix_len), None);
+            *self.prefix.borrow_mut() = Some(CachedPrefix {
+                stamp,
+                prefix_len,
+                carries: carries.clone(),
+            });
+            carries
+        };
+        let hidden = self.suffix(&ids, prefix_len, image_at, n_image, grid_h, grid_w, &carries);
+        Ok(self.read_slots(&hidden, &slots, prefix_len))
     }
 
     fn render(
@@ -442,42 +476,113 @@ impl VisionDecision {
         Tensor::from_data(TensorData::new(gathered, [n, VISION_HIDDEN]), &self.device)
     }
 
-    fn forward(
-        &self,
-        ids: &[u32],
-        image_at: usize,
-        n_image: usize,
-        grid_h: usize,
-        grid_w: usize,
-        image_rows: &Tensor<Wgpu, 2>,
-    ) -> Tensor<Wgpu, 2> {
+    fn embed_ids(&self, ids: &[u32]) -> Tensor<Wgpu, 2> {
         let mut gathered = vec![0f32; ids.len() * TEXT_HIDDEN];
         for (index, id) in ids.iter().enumerate() {
             let src = *id as usize * TEXT_HIDDEN;
             gathered[index * TEXT_HIDDEN..(index + 1) * TEXT_HIDDEN]
                 .copy_from_slice(&self.embed[src..src + TEXT_HIDDEN]);
         }
-        let mut hidden = Tensor::from_data(TensorData::new(gathered, [ids.len(), TEXT_HIDDEN]), &self.device);
+        Tensor::from_data(TensorData::new(gathered, [ids.len(), TEXT_HIDDEN]), &self.device)
+    }
+
+    fn splice_image(
+        &self,
+        hidden: Tensor<Wgpu, 2>,
+        image_at: usize,
+        n_image: usize,
+        image_rows: &Tensor<Wgpu, 2>,
+    ) -> Tensor<Wgpu, 2> {
+        let length = hidden.dims()[0];
         let before = hidden.clone().narrow(0, 0, image_at);
-        let after = hidden.clone().narrow(0, image_at + n_image, ids.len() - image_at - n_image);
-        hidden = Tensor::cat(vec![before, image_rows.clone(), after], 0);
+        let after = hidden.narrow(0, image_at + n_image, length - image_at - n_image);
+        Tensor::cat(vec![before, image_rows.clone(), after], 0)
+    }
+
+    fn suffix(
+        &self,
+        ids: &[u32],
+        prefix_len: usize,
+        image_at: usize,
+        n_image: usize,
+        grid_h: usize,
+        grid_w: usize,
+        carries: &[Carry],
+    ) -> Tensor<Wgpu, 2> {
+        let hidden = self.embed_ids(&ids[prefix_len..]);
         let (cos, sin) = text_mrope(ids, image_at, n_image, grid_h, grid_w, &self.device);
-        let mask = causal_mask(ids.len(), &self.device);
-        for block in &self.blocks {
-            hidden = match block {
-                Block::Linear(layer) => linear_block(hidden, layer, &self.device),
-                Block::Full(layer) => full_block(hidden, layer, &cos, &sin, &mask),
-            };
-        }
+        let (hidden, _) = self.run(
+            hidden,
+            &cos.narrow(0, prefix_len, ids.len() - prefix_len),
+            &sin.narrow(0, prefix_len, ids.len() - prefix_len),
+            Some(carries),
+        );
         rms35(hidden, &self.text_norm)
+    }
+
+    fn run(
+        &self,
+        mut hidden: Tensor<Wgpu, 2>,
+        cos: &Tensor<Wgpu, 2>,
+        sin: &Tensor<Wgpu, 2>,
+        past: Option<&[Carry]>,
+    ) -> (Tensor<Wgpu, 2>, Vec<Carry>) {
+        let mut carries = Vec::with_capacity(self.blocks.len());
+        for (index, block) in self.blocks.iter().enumerate() {
+            let (next, carry) = step_block(block, hidden, cos, sin, past.map(|item| &item[index]), &self.device);
+            hidden = next;
+            carries.push(carry);
+        }
+        (hidden, carries)
+    }
+
+    fn read_slots(&self, hidden: &Tensor<Wgpu, 2>, slots: &[usize], prefix_len: usize) -> Vec<f32> {
+        let data = hidden.clone().into_data();
+        let values = data.as_slice::<f32>().unwrap();
+        slots
+            .iter()
+            .map(|slot| {
+                let mut logit = self.head_b;
+                let row = (slot - prefix_len) * TEXT_HIDDEN;
+                for dim in 0..TEXT_HIDDEN {
+                    logit += values[row + dim] * self.head_w[dim];
+                }
+                logit
+            })
+            .collect()
     }
 }
 
-fn linear_block(hidden: Tensor<Wgpu, 2>, layer: &LinearBlock, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
+fn step_block(
+    block: &Block,
+    hidden: Tensor<Wgpu, 2>,
+    cos: &Tensor<Wgpu, 2>,
+    sin: &Tensor<Wgpu, 2>,
+    past: Option<&Carry>,
+    device: &WgpuDevice,
+) -> (Tensor<Wgpu, 2>, Carry) {
+    match (block, past) {
+        (Block::Linear(layer), Some(Carry::Linear { mixed_tail, state })) => {
+            linear_block(hidden, layer, device, mixed_tail, state)
+        }
+        (Block::Linear(layer), None) => linear_block(hidden, layer, device, &[], &vec![0f32; V_HEADS * LIN_DIM * LIN_DIM]),
+        (Block::Full(layer), Some(Carry::Full { k, v })) => full_block(hidden, layer, cos, sin, Some((k, v))),
+        (Block::Full(layer), None) => full_block(hidden, layer, cos, sin, None),
+        _ => panic!("language layer cache does not match the block"),
+    }
+}
+
+fn linear_block(
+    hidden: Tensor<Wgpu, 2>,
+    layer: &LinearBlock,
+    device: &WgpuDevice,
+    history: &[f32],
+    state: &[f32],
+) -> (Tensor<Wgpu, 2>, Carry) {
     let seq = hidden.dims()[0];
     let normed = rms35(hidden.clone(), &layer.input_norm);
     let mixed = cpu_f32(&linear2(&normed, &layer.qkv, None));
-    let conv = causal_conv(&mixed, &layer.conv, seq);
+    let conv = causal_conv(&mixed, history, &layer.conv, seq);
     let z = cpu_f32(&linear2(&normed, &layer.z, None));
     let a = cpu_f32(&linear2(&normed, &layer.a, None));
     let b = cpu_f32(&linear2(&normed, &layer.b, None));
@@ -502,14 +607,26 @@ fn linear_block(hidden: Tensor<Wgpu, 2>, layer: &LinearBlock, device: &WgpuDevic
             beta[t * V_HEADS + head] = 1.0 / (1.0 + (-bb).exp());
         }
     }
-    let core = gated_delta(&q, &k, &v, &g, &beta, seq);
+    let mut recurrent = state.to_vec();
+    let core = gated_delta(&q, &k, &v, &g, &beta, seq, &mut recurrent);
     let norm = layer.norm.clone().into_data().as_slice::<f32>().unwrap().to_vec();
     let gated = gate_norm(&core, &z, &norm);
     let core_t = Tensor::<Wgpu, 2>::from_data(TensorData::new(gated, [seq, VALUE_DIM]), device);
-    let mixed = linear2(&core_t, &layer.out, None);
-    let hidden = hidden + mixed;
+    let projected = linear2(&core_t, &layer.out, None);
+    let hidden = hidden + projected;
     let normed = rms35(hidden.clone(), &layer.post_norm);
-    hidden + mlp(&normed, &layer.gate, &layer.up, &layer.down)
+    let keep = (CONV_K - 1).min(seq);
+    let mixed_tail = if seq >= CONV_K - 1 {
+        mixed[(seq - keep) * CONV_DIM..].to_vec()
+    } else {
+        let mut tail = history[history.len().saturating_sub((CONV_K - 1 - seq) * CONV_DIM)..].to_vec();
+        tail.extend_from_slice(&mixed);
+        tail
+    };
+    (
+        hidden + mlp(&normed, &layer.gate, &layer.up, &layer.down),
+        Carry::Linear { mixed_tail, state: recurrent },
+    )
 }
 
 fn l2_repeat(src: &[f32], dst: &mut [f32], scale_query: bool) {
@@ -530,26 +647,33 @@ fn l2_repeat(src: &[f32], dst: &mut [f32], scale_query: bool) {
     }
 }
 
-fn causal_conv(mixed: &[f32], weight: &[f32], seq: usize) -> Vec<f32> {
+fn causal_conv(mixed: &[f32], history: &[f32], weight: &[f32], seq: usize) -> Vec<f32> {
+    let hist = history.len() / CONV_DIM;
     let mut out = vec![0f32; seq * CONV_DIM];
     for t in 0..seq {
         for channel in 0..CONV_DIM {
             let mut acc = 0.0f32;
             for tap in 0..CONV_K {
                 let src = t as isize - (CONV_K as isize - 1 - tap as isize);
-                if src >= 0 {
-                    acc += mixed[src as usize * CONV_DIM + channel] * weight[channel * CONV_K + tap];
-                }
+                let value = if src >= 0 {
+                    mixed[src as usize * CONV_DIM + channel]
+                } else {
+                    let earlier = hist as isize + src;
+                    if earlier >= 0 {
+                        history[earlier as usize * CONV_DIM + channel]
+                    } else {
+                        0.0
+                    }
+                };
+                acc += value * weight[channel * CONV_K + tap];
             }
-            let y = acc;
-            out[t * CONV_DIM + channel] = y / (1.0 + (-y).exp());
+            out[t * CONV_DIM + channel] = acc / (1.0 + (-acc).exp());
         }
     }
     out
 }
 
-fn gated_delta(q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], seq: usize) -> Vec<f32> {
-    let mut state = vec![0f32; V_HEADS * LIN_DIM * LIN_DIM];
+fn gated_delta(q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], seq: usize, state: &mut [f32]) -> Vec<f32> {
     let mut out = vec![0f32; seq * VALUE_DIM];
     for t in 0..seq {
         for head in 0..V_HEADS {
@@ -613,8 +737,8 @@ fn full_block(
     layer: &FullBlock,
     cos: &Tensor<Wgpu, 2>,
     sin: &Tensor<Wgpu, 2>,
-    mask: &Tensor<Wgpu, 2>,
-) -> Tensor<Wgpu, 2> {
+    past: Option<(&Tensor<Wgpu, 3>, &Tensor<Wgpu, 3>)>,
+) -> (Tensor<Wgpu, 2>, Carry) {
     let seq = hidden.dims()[0];
     let normed = rms35(hidden.clone(), &layer.input_norm);
     let projected = linear2(&normed, &layer.q, None).reshape([seq, TEXT_HEADS, TEXT_HEAD_DIM * 2]);
@@ -626,12 +750,25 @@ fn full_block(
     let k = rope_partial(rms_heads(k, &layer.k_norm), cos, sin);
     let k = repeat_kv(k);
     let v = repeat_kv(v);
-    let scores = q.clone().matmul(k.swap_dims(1, 2)) / (TEXT_HEAD_DIM as f32).sqrt();
-    let probs = softmax(scores + mask.clone().unsqueeze_dim::<3>(0), 2);
-    let mixed = probs.matmul(v).swap_dims(0, 1).reshape([seq, TEXT_HEADS * TEXT_HEAD_DIM]) * gate;
+    let past_len = past.map(|(key, _)| key.dims()[1]).unwrap_or(0);
+    let k_all = match past {
+        Some((past_k, _)) => Tensor::cat(vec![past_k.clone(), k.clone()], 1),
+        None => k.clone(),
+    };
+    let v_all = match past {
+        Some((_, past_v)) => Tensor::cat(vec![past_v.clone(), v.clone()], 1),
+        None => v.clone(),
+    };
+    let scores = q.clone().matmul(k_all.clone().swap_dims(1, 2)) / (TEXT_HEAD_DIM as f32).sqrt();
+    let mask = causal_mask_from(past_len, seq, &hidden.device());
+    let probs = softmax(scores + mask.unsqueeze_dim::<3>(0), 2);
+    let mixed = probs.matmul(v_all.clone()).swap_dims(0, 1).reshape([seq, TEXT_HEADS * TEXT_HEAD_DIM]) * gate;
     let hidden = hidden + linear2(&mixed, &layer.o, None);
     let normed = rms35(hidden.clone(), &layer.post_norm);
-    hidden + mlp(&normed, &layer.gate, &layer.up, &layer.down)
+    (
+        hidden + mlp(&normed, &layer.gate, &layer.up, &layer.down),
+        Carry::Full { k: k_all, v: v_all },
+    )
 }
 
 fn mlp(x: &Tensor<Wgpu, 2>, gate: &Tensor<Wgpu, 2>, up: &Tensor<Wgpu, 2>, down: &Tensor<Wgpu, 2>) -> Tensor<Wgpu, 2> {
@@ -983,14 +1120,24 @@ fn text_mrope(
     )
 }
 
-fn causal_mask(n: usize, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
-    let mut mask = vec![0f32; n * n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            mask[i * n + j] = f32::NEG_INFINITY;
+fn causal_mask_from(past: usize, seq: usize, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
+    let total = past + seq;
+    let mut mask = vec![0f32; seq * total];
+    for i in 0..seq {
+        for j in (past + i + 1)..total {
+            mask[i * total + j] = f32::NEG_INFINITY;
         }
     }
-    Tensor::from_data(TensorData::new(mask, [n, n]), device)
+    Tensor::from_data(TensorData::new(mask, [seq, total]), device)
+}
+
+fn image_stamp(image: &RgbImage, state: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in image.width.to_le_bytes().into_iter().chain(image.height.to_le_bytes()).chain(image.data.iter().copied()).chain(state.as_bytes().iter().copied()) {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn linear2(x: &Tensor<Wgpu, 2>, weight: &Tensor<Wgpu, 2>, bias: Option<&Tensor<Wgpu, 1>>) -> Tensor<Wgpu, 2> {

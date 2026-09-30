@@ -162,7 +162,7 @@ choice(
 
 Text is the default. [`FuzzyDecision`] loads Kev-4B and scores a typed question with the pointer head. There is no image input.
 
-Vision is [`VisionDecision`]. It loads `yah01/vjev-vision` from a directory you prepare (the library does not download it): `tokenizer.json`, `vjev.json`, `head.pt`, `model.safetensors.index.json`, and the safetensor shards. The trunk is Qwen3.5-4B with its vision tower. A single linear head reads every option in one forward pass. `choice`, `noul`, and `score` return the same answer types as the text mode. The checkpoint is Apache-2.0.
+Vision is [`VisionDecision`]. It loads `yah01/vjev-vision` from a directory you prepare (the library does not download it): `tokenizer.json`, `vjev.json`, `head.pt`, `model.safetensors.index.json`, and the safetensor shards. The trunk is Qwen3.5-4B with its vision tower. A single linear head reads every option in one forward pass. `choice`, `noul`, and `score` return the same answer types as the text mode. Each call is still one question. A later call with the same image bytes and the same state reuses the picture encoding and the language-model state up to that state, and runs only the new question. The checkpoint is Apache-2.0.
 
 ```rust
 use fuzzy_decision::{RgbImage, VisionDecision};
