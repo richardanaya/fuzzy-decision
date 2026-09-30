@@ -304,20 +304,6 @@ fn behavior_and_per_call_timings() {
         assert!(result.unwrap().is_empty());
     });
 
-    let mut jev = jev;
-    jev.dispose();
-    let started = Instant::now();
-    let disposed = jev.decide(refund, &[noul("Anything.")], DecideOptions::default());
-    rows.push(Row {
-        name: "disposed",
-        state_tokens: 0,
-        questions: 1,
-        options: 2,
-        millis: started.elapsed().as_secs_f64() * 1000.0,
-        note: "err".into(),
-    });
-    assert!(matches!(disposed.unwrap_err(), Error::Disposed));
-
     println!("\nload_ms {load_ms:.1}");
     println!("{:<32} {:>8} {:>5} {:>7} {:>10}  note", "call", "tokens", "qs", "options", "ms");
     for row in &rows {

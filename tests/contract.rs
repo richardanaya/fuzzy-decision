@@ -1,27 +1,25 @@
 //! API checks that do not load the 0.6B checkpoint.
 //! The forward pass is covered by `tests/kev_forward.rs` when `models/kev-0.6b` is present.
 
-use fuzzy_decision::{Family, FuzzyDecision, LoadOptions, DEFAULT_MODEL, MODELS};
+use fuzzy_decision::{FuzzyDecision, LoadOptions, ADAPTER_REPO, BASE_REPO, DEFAULT_MODEL};
 
 #[test]
-fn aliases_match_the_checkpoint_names() {
+fn checkpoint_names_match_the_weight_files() {
     assert_eq!(DEFAULT_MODEL, "kev-0.6b");
-    assert_eq!(
-        MODELS,
-        &[
-            ("kev-0.6b", "onnx-community/kev-0.6b-ONNX"),
-            ("kev-4b", "onnx-community/kev-4b-ONNX"),
-        ]
-    );
+    assert_eq!(BASE_REPO, "Qwen/Qwen3-0.6B-Base");
+    assert_eq!(ADAPTER_REPO, "jaredpalmer/kev-0.6b");
 }
 
 #[test]
-fn info_reports_the_kev_family() {
-    let info = FuzzyDecision::info(&LoadOptions::default());
-    assert_eq!(info.family, Family::Kev);
-    assert_eq!(info.device, "webgpu");
-    assert_eq!(info.model, "onnx-community/kev-0.6b-ONNX");
-    assert_eq!(Family::Kev.as_str(), "kev");
+fn info_names_the_repos_and_the_directory() {
+    let info = FuzzyDecision::info(&LoadOptions {
+        weights_dir: Some("/tmp/fuzzy-decision-absent".into()),
+        ..LoadOptions::default()
+    });
+    assert_eq!(info.model, DEFAULT_MODEL);
+    assert_eq!(info.base_repo, BASE_REPO);
+    assert_eq!(info.adapter_repo, ADAPTER_REPO);
+    assert!(!info.ready);
 }
 
 #[test]

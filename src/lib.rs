@@ -8,7 +8,8 @@
 //! `kev-0.6b` runs the published checkpoint: `Qwen/Qwen3-0.6B-Base` with the
 //! `jaredpalmer/kev-0.6b` LoRA merged in, and that checkpoint's pointer head.
 //! The forward pass is Burn on the WGPU device. Weights are read from
-//! `models/kev-0.6b` (or `LoadOptions::weights_dir`).
+//! `models/kev-0.6b` (or `LoadOptions::weights_dir`). The library does not
+//! download them.
 
 #![recursion_limit = "256"]
 
@@ -33,35 +34,19 @@ use questions::{validate_question, QuestionLimits};
 use qwen::Qwen3Kev;
 use tokenize::HfTokenizer;
 
-/// Hugging Face repos behind the built-in aliases.
-pub const MODELS: &[(&str, &str)] = &[
-    ("kev-0.6b", "onnx-community/kev-0.6b-ONNX"),
-    ("kev-4b", "onnx-community/kev-4b-ONNX"),
-];
-
+/// The only checkpoint [`FuzzyDecision::load`] accepts.
 pub const DEFAULT_MODEL: &str = "kev-0.6b";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Family {
-    Kev,
-}
+/// Base weights. File: `model.safetensors`. License: Apache-2.0.
+pub const BASE_REPO: &str = "Qwen/Qwen3-0.6B-Base";
 
-impl Family {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Family::Kev => "kev",
-        }
-    }
-}
+/// LoRA, tokenizer, and pointer head. License: Apache-2.0.
+pub const ADAPTER_REPO: &str = "jaredpalmer/kev-0.6b";
 
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
-    /// Alias (`kev-0.6b`, `kev-4b`) or any other repo id.
-    /// Unknown ids are treated as the kev family.
+    /// Must be [`DEFAULT_MODEL`]. Any other name returns [`Error::UnsupportedModel`].
     pub model: String,
-    /// Recorded on [`Runtime`]. The in-process head is f32.
-    pub dtype: String,
-    pub device: String,
     pub max_length: Option<usize>,
     pub temperature: Option<f32>,
     pub max_state_tokens: Option<usize>,
@@ -75,8 +60,6 @@ impl Default for LoadOptions {
     fn default() -> Self {
         Self {
             model: DEFAULT_MODEL.to_string(),
-            dtype: "auto".to_string(),
-            device: "auto".to_string(),
             max_length: None,
             temperature: None,
             max_state_tokens: None,
@@ -150,26 +133,18 @@ impl DecideOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Runtime {
-    pub model: String,
-    pub family: Family,
-    pub device: String,
-    pub dtype: String,
-}
-
+/// Where the weight files are, and whether that directory already holds them.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
-    pub is_cached: bool,
-    pub download_size: u64,
-    pub model: String,
-    pub family: Family,
-    pub device: String,
-    pub dtype: String,
+    pub model: &'static str,
+    pub base_repo: &'static str,
+    pub adapter_repo: &'static str,
+    pub weights_dir: PathBuf,
+    /// `model.safetensors`, `adapter_model.safetensors`, `head.safetensors`, and `tokenizer.json` are present.
+    pub ready: bool,
 }
 
 pub struct FuzzyDecision {
-    runtime: Runtime,
     limits: QuestionLimits,
     temperature: f32,
     max_state_tokens: usize,
@@ -177,22 +152,18 @@ pub struct FuzzyDecision {
     truncation: Truncation,
     tokenizer: HfTokenizer,
     model: Qwen3Kev,
-    disposed: bool,
 }
 
 impl std::fmt::Debug for FuzzyDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FuzzyDecision")
-            .field("runtime", &self.runtime)
-            .field("disposed", &self.disposed)
+            .field("model", &DEFAULT_MODEL)
             .finish()
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("fuzzy-decision instance has been disposed")]
-    Disposed,
     #[error("Question {label} needs non-empty instructions.")]
     EmptyInstructions { label: String },
     #[error("Question {label} has unknown type \"{got}\". Expected \"choice\", \"score\" or \"noul\".")]
@@ -233,46 +204,27 @@ pub enum Error {
     Weights { message: String },
 }
 
-struct FamilySpec {
-    family: Family,
-    limits: QuestionLimits,
-    temperature: f32,
-    max_state_tokens: usize,
-    max_length: usize,
-    dtype: &'static str,
-}
-
-fn family_for_model(_model: &str) -> FamilySpec {
-    FamilySpec {
-        family: Family::Kev,
-        limits: QuestionLimits {
-            min_choice_options: 1,
-            max_choice_options: 255,
-            min_score_levels: 2,
-            max_score_levels: 255,
-        },
-        temperature: 1.0,
-        max_state_tokens: 8192,
-        max_length: 8192,
-        dtype: "q4f16",
+fn limits() -> QuestionLimits {
+    QuestionLimits {
+        min_choice_options: 1,
+        max_choice_options: 255,
+        min_score_levels: 2,
+        max_score_levels: 255,
     }
 }
 
-fn resolve_repo(model: &str) -> String {
-    MODELS
+const DEFAULT_TEMPERATURE: f32 = 1.0;
+const DEFAULT_MAX_STATE: usize = 8192;
+const DEFAULT_MAX_LENGTH: usize = 8192;
+
+fn weights_ready(dir: &Path) -> bool {
+    ["model.safetensors", "adapter_model.safetensors", "head.safetensors", "tokenizer.json"]
         .iter()
-        .find(|(alias, _)| *alias == model)
-        .map(|(_, repo)| (*repo).to_string())
-        .unwrap_or_else(|| model.to_string())
+        .all(|name| dir.join(name).is_file())
 }
 
 impl FuzzyDecision {
-    /// Load Kev-0.6B onto the default WGPU device.
-    ///
-    /// `options.model` must be `kev-0.6b`. The directory must contain the base
-    /// `model.safetensors`, `adapter_model.safetensors`, `head.safetensors`,
-    /// and `tokenizer.json`.
-    /// Load Kev-0.6B from `dir`.
+    /// Load Kev-0.6B from `dir`. The directory must already hold the four weight files.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
         Self::load(LoadOptions::dir(dir.as_ref()))
     }
@@ -286,17 +238,6 @@ impl FuzzyDecision {
         if let Some(temperature) = options.temperature {
             check_temperature(temperature)?;
         }
-        let spec = family_for_model(&options.model);
-        let dtype = if options.dtype == "auto" {
-            "bf16".to_string()
-        } else {
-            options.dtype.clone()
-        };
-        let device_name = if options.device == "auto" {
-            "webgpu".to_string()
-        } else {
-            options.device.clone()
-        };
         let dir = options
             .weights_dir
             .clone()
@@ -319,56 +260,35 @@ impl FuzzyDecision {
             .map_err(|message| Error::Weights { message })?;
         let model = weights::load_kev(&dir, &device).map_err(|message| Error::Weights { message })?;
         Ok(Self {
-            runtime: Runtime {
-                model: options.model,
-                family: spec.family,
-                device: device_name,
-                dtype,
-            },
-            limits: spec.limits,
-            temperature: options.temperature.unwrap_or(spec.temperature),
-            max_state_tokens: options.max_state_tokens.unwrap_or(spec.max_state_tokens),
-            max_length: options.max_length.unwrap_or(spec.max_length),
+            limits: limits(),
+            temperature: options.temperature.unwrap_or(DEFAULT_TEMPERATURE),
+            max_state_tokens: options.max_state_tokens.unwrap_or(DEFAULT_MAX_STATE),
+            max_length: options.max_length.unwrap_or(DEFAULT_MAX_LENGTH),
             truncation: options.truncation,
             tokenizer,
             model,
-            disposed: false,
         })
     }
 
-    /// Cache metadata. Weights live in the process, so nothing is downloaded.
+    /// Names the checkpoint and reports whether `weights_dir` already holds the four files.
+    /// Does not read the tensors and does not download them.
     pub fn info(options: &LoadOptions) -> ModelInfo {
-        let spec = family_for_model(&options.model);
-        let dtype = if options.dtype == "auto" {
-            spec.dtype.to_string()
-        } else {
-            options.dtype.clone()
-        };
-        let device = if options.device == "auto" {
-            "webgpu".to_string()
-        } else {
-            options.device.clone()
-        };
+        let weights_dir = options
+            .weights_dir
+            .clone()
+            .unwrap_or_else(weights::default_weights_dir);
+        let ready = weights_ready(&weights_dir);
         ModelInfo {
-            is_cached: true,
-            download_size: 0,
-            model: resolve_repo(&options.model),
-            family: spec.family,
-            device,
-            dtype,
+            model: DEFAULT_MODEL,
+            base_repo: BASE_REPO,
+            adapter_repo: ADAPTER_REPO,
+            weights_dir,
+            ready,
         }
-    }
-
-    pub fn runtime(&self) -> &Runtime {
-        &self.runtime
     }
 
     pub fn count_tokens(&self, text: &str) -> usize {
         self.tokenizer.count(text)
-    }
-
-    pub fn dispose(&mut self) {
-        self.disposed = true;
     }
 
     /// Yes/no on `statement`. `answer` is true when the yes probability is at least 0.5.
@@ -478,7 +398,7 @@ impl FuzzyDecision {
         questions: &[Question],
         options: DecideOptions,
     ) -> Result<Vec<Answer>, Error> {
-        self.ensure_live()?;
+
         for (index, question) in questions.iter().enumerate() {
             validate_question(question, &format!("#{index}"), self.limits)?;
         }
@@ -491,7 +411,7 @@ impl FuzzyDecision {
         questions: &BTreeMap<String, Question>,
         options: DecideOptions,
     ) -> Result<BTreeMap<String, Answer>, Error> {
-        self.ensure_live()?;
+
         let mut ordered: Vec<(String, Question)> = Vec::with_capacity(questions.len());
         for (key, question) in questions {
             validate_question(question, key, self.limits)?;
@@ -530,13 +450,6 @@ impl FuzzyDecision {
             .collect())
     }
 
-    fn ensure_live(&self) -> Result<(), Error> {
-        if self.disposed {
-            Err(Error::Disposed)
-        } else {
-            Ok(())
-        }
-    }
 }
 
 fn check_temperature(temperature: f32) -> Result<(), Error> {
@@ -562,15 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_weight_file_names_the_directory() {
-        let err = FuzzyDecision::open("/tmp/fuzzy-decision-missing-weights").unwrap_err();
-        let Error::MissingFile { file, .. } = err else {
-            panic!("expected a missing file, got {err}");
-        };
-        assert_eq!(file, "model.safetensors");
-    }
-
-    #[test]
     fn temperature_must_be_positive() {
         let err = FuzzyDecision::load(LoadOptions::default().temperature(0.0)).unwrap_err();
         assert!(matches!(err, Error::Temperature { value } if value == 0.0));
@@ -579,8 +483,9 @@ mod tests {
     #[test]
     fn info_names_webgpu() {
         let info = FuzzyDecision::info(&LoadOptions::default());
-        assert_eq!(info.device, "webgpu");
-        assert_eq!(info.family, Family::Kev);
-        assert!(info.is_cached);
+        assert_eq!(info.model, DEFAULT_MODEL);
+        assert_eq!(info.base_repo, BASE_REPO);
+        assert_eq!(info.adapter_repo, ADAPTER_REPO);
+        assert!(info.weights_dir.ends_with("kev-0.6b"));
     }
 }

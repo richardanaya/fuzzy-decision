@@ -2,7 +2,7 @@
 
 `fuzzy-decision` scores a piece of text against questions you write. Each answer is a probability over the options you supplied. The model does not write new text.
 
-The loaded checkpoint is **Kev-0.6B**: `Qwen/Qwen3-0.6B-Base`, the LoRA from `jaredpalmer/kev-0.6b` merged in at load, and that repo's pointer head. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. The library reads weights from disk. It does not download them.
+The loaded checkpoint is **Kev-0.6B**: `Qwen/Qwen3-0.6B-Base`, the LoRA from `jaredpalmer/kev-0.6b` merged in at load, and that repo's pointer head. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads those files from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate: `Qwen/Qwen3-0.6B-Base` and `jaredpalmer/kev-0.6b` are both Apache-2.0.
 
 One process holds one loaded model. Later calls reuse it.
 
@@ -13,24 +13,63 @@ One process holds one loaded model. Later calls reuse it.
 fuzzy-decision = "0.1"
 ```
 
-A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The first `open` compiles shaders and loads about 1.2 GB of weights. On the machine this was timed on, that load was about two seconds, and a short question after warmup was about 160 ms.
+A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). Loading the files and compiling shaders takes a few seconds, and a short question is about 160 ms.
 
 ## Weights
 
-Create `models/kev-0.6b/` and put these four files in it:
+Put these four files in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/kev-0.6b` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
 
-| File | Where it comes from |
+| File in that directory | Exact URL |
 | --- | --- |
-| `model.safetensors` | [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base) |
-| `adapter_model.safetensors` | [jaredpalmer/kev-0.6b](https://huggingface.co/jaredpalmer/kev-0.6b) |
-| `tokenizer.json` | the same Kev repo |
-| `head.safetensors` | the pointer head from that repo's `head.pt` |
+| `model.safetensors` | https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/main/model.safetensors |
+| `adapter_model.safetensors` | https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/adapter_model.safetensors |
+| `tokenizer.json` | https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/tokenizer.json |
+| `head.safetensors` | built from https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/head.pt |
 
-`head.pt` is a PyTorch zip. This crate reads safetensors, so convert the four float32 tensors (`q.weight`, `q.bias`, `k.weight`, `k.bias`) into `head.safetensors` before you call `open`. Shapes are `q`/`k` weight `[256, 1024]` and bias `[256]`.
+`model.safetensors` is the base model, about 1.2 GB, from [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base). The adapter and the tokenizer come from [jaredpalmer/kev-0.6b](https://huggingface.co/jaredpalmer/kev-0.6b). That repo publishes the pointer head as `head.pt`, a PyTorch zip. This crate reads `head.safetensors` with four float32 tensors: `q.weight` and `k.weight` shaped `[256, 1024]`, and `q.bias` and `k.bias` shaped `[256]`.
 
-`FuzzyDecision::open("models/kev-0.6b")` reads that directory. `FuzzyDecision::load(LoadOptions::default())` looks for `models/kev-0.6b` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
+Fetch them from the application that embeds this library, once, before the first `open`. The library never calls the network.
 
-Kev-4B and the other published Kev sizes are not loaded. `LoadOptions { model: "kev-4b", .. }` returns `Error::UnsupportedModel`.
+```bash
+DIR=models/kev-0.6b
+mkdir -p "$DIR"
+curl -L --fail -o "$DIR/model.safetensors" \
+  https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/main/model.safetensors
+curl -L --fail -o "$DIR/adapter_model.safetensors" \
+  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/adapter_model.safetensors
+curl -L --fail -o "$DIR/tokenizer.json" \
+  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/tokenizer.json
+curl -L --fail -o "$DIR/head.pt" \
+  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/head.pt
+python3 - "$DIR" << 'PY'
+import json, struct, sys, zipfile
+from pathlib import Path
+directory = Path(sys.argv[1])
+archive = zipfile.ZipFile(directory / "head.pt")
+specs = [
+    ("q.weight", "head/data/0", [256, 1024]),
+    ("q.bias", "head/data/1", [256]),
+    ("k.weight", "head/data/2", [256, 1024]),
+    ("k.bias", "head/data/3", [256]),
+]
+header, offset, blobs = {}, 0, []
+for name, member, shape in specs:
+    raw = archive.read(member)
+    header[name] = {"dtype": "F32", "shape": shape, "data_offsets": [offset, offset + len(raw)]}
+    offset += len(raw)
+    blobs.append(raw)
+meta = json.dumps(header, separators=(",", ":")).encode()
+meta += b" " * ((8 - len(meta) % 8) % 8)
+with (directory / "head.safetensors").open("wb") as out:
+    out.write(struct.pack("<Q", len(meta)))
+    out.write(meta)
+    out.writelines(blobs)
+PY
+```
+
+Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or set `LoadOptions { weights_dir: Some(path), .. }`. Do not commit the files.
+
+Only `kev-0.6b` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`. Weights are `f32` on the default WGPU device.
 
 ## One question
 
@@ -184,9 +223,8 @@ let sharp = decider.choice_with(
 | `Temperature` | temperature is not finite or is not greater than zero |
 | `Truncated` | strict truncation and the state does not fit |
 | `Row` | one question plus the state exceeds the row limit |
-| `Disposed` | `dispose` was called and a later call used the same value |
 
-`dispose` marks the value so later calls fail. Dropping it is enough if you are finished.
+Drop the `FuzzyDecision` value when you are finished. That releases the model.
 
 ## What the model sees
 

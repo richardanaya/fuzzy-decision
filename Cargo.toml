@@ -5,6 +5,7 @@ edition = "2021"
 description = "Typed decisions (choice, score, noul) scored on Burn's WGPU backend."
 authors = ["Richard Anaya"]
 license = "MIT"
+repository = "https://github.com/richardanaya/fuzzy-decision"
 readme = "README.md"
 
 [dependencies]
