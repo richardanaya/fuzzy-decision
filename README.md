@@ -191,7 +191,7 @@ fn main() -> Result<(), fuzzy_decision::Error> {
 
 ## Image eval
 
-`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `yah01/vjev-vision` snapshot and score packed RGB images. The latest run is the report in [image_eval.html](image_eval.html): 28 of 28 items matched the labeled answer. The example does not download weights.
+`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `yah01/vjev-vision` snapshot and score packed RGB images. The latest run is the report in [image_eval.html](image_eval.html): 36 of 36 items matched the labeled answer. The example does not download weights.
 
 ## Limits
 
