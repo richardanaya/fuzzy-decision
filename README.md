@@ -1,6 +1,6 @@
 # fuzzy-decision
 
-`fuzzy-decision` scores a piece of text against questions you write. Each answer is a probability over the options you supplied. The model does not write new text.
+`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text questions use Kev-4B. Image questions use Qwen3-VL-4B-Instruct.
 
 The loaded checkpoint is **Kev-4B** on its Qwen3 revision: `Qwen/Qwen3-4B-Base`, the LoRA from `jaredpalmer/kev-4b` at revision `qwen3` merged in at load, and that revision's pointer head. The `main` files of `jaredpalmer/kev-4b` are a Qwen3.5 hybrid and do not load. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads those files from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate: `Qwen/Qwen3-4B-Base` and `jaredpalmer/kev-4b` are both Apache-2.0.
 
@@ -10,7 +10,7 @@ One process holds one loaded model. Later calls reuse it.
 
 ```toml
 [dependencies]
-fuzzy-decision = "0.2"
+fuzzy-decision = "0.3"
 ```
 
 A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The weights are stored as f32, so the 4B checkpoint needs several gigabytes of GPU memory. Loading the files and compiling shaders takes longer than it did for the 0.6B checkpoint.
@@ -158,9 +158,40 @@ choice(
 
 `decide_map` takes a `BTreeMap<String, Question>` and returns a `BTreeMap<String, Answer>` with the same keys. Map order is sorted by key, and that sorted order is the order the questions are packed.
 
+## Modes
+
+Text is the default. [`FuzzyDecision`] loads Kev-4B and scores a typed question with the pointer head. There is no image input.
+
+Vision is [`VisionDecision`]. It loads `Qwen/Qwen3-VL-4B-Instruct` from a directory you prepare (the library does not download it): `tokenizer.json`, `model.safetensors.index.json`, and the two `model-0000N-of-00002.safetensors` shards. Pass an RGB image with the question. The checkpoint has no pointer head, so each option is scored by the probability the model would write that phrase after the picture. `choice`, `noul`, and `score` return the same answer types as the text mode. `Qwen/Qwen3-VL-4B-Instruct` is Apache-2.0.
+
+```rust
+use fuzzy_decision::{RgbImage, VisionDecision};
+
+fn main() -> Result<(), fuzzy_decision::Error> {
+    let decider = VisionDecision::load("models/qwen3-vl-4b-instruct")?;
+    let image = RgbImage {
+        width: 320,
+        height: 320,
+        data: std::fs::read("picture.rgb").expect("rgb bytes"),
+    };
+    let answer = decider.choice(
+        &image,
+        "",
+        "What is the main subject?",
+        &["a red circle", "a blue square"],
+    )?;
+    println!("{}", answer.choice);
+    Ok(())
+}
+```
+
 ## Domain eval
 
-`cargo run --release --example domain_eval` loads `models/kev-4b` and scores 1000 professional and everyday classification questions across 21 domains, including message intent, document topic, entailment, abstaining, team routing, expenses, urgency, sentiment, news desk, document type, industry, and others. The latest run is the report in [index.html](index.html): 893 of 1000 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
+`cargo run --release --example domain_eval` loads `models/kev-4b` and scores 1000 professional and everyday classification questions across 21 domains, including message intent, document topic, entailment, abstaining, team routing, expenses, urgency, sentiment, news desk, document type, industry, and others. The latest run is the report in [text_eval.html](text_eval.html): 893 of 1000 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
+
+## Image eval
+
+`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `Qwen/Qwen3-VL-4B-Instruct` snapshot and score packed RGB images. The latest run is [image_eval.html](image_eval.html): 19 of 28 generated pictures matched the labeled answer. Subject labels were 12 of 12. Danger, emotion, and action were 7 of 16. Each option is a separate forward pass, so a question with more phrases takes longer. The example does not download weights.
 
 ## Limits
 

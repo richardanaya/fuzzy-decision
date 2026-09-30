@@ -1,5 +1,5 @@
 //! Professional and common classification questions. One load of models/kev-4b.
-//! Writes index.html next to Cargo.toml.
+//! Writes text_eval.html next to Cargo.toml.
 //!
 //! ```text
 //! cargo run --release --example domain_eval
@@ -206,7 +206,7 @@ fn write_report(outcomes: &[Outcome]) {
         miss_rows = miss_rows,
         item_rows = item_rows,
     );
-    fs::write("index.html", html).expect("write index.html");
+    fs::write("text_eval.html", html).expect("write text_eval.html");
 }
 
 fn main() -> ExitCode {
@@ -291,6 +291,6 @@ fn main() -> ExitCode {
     }
 
     write_report(&outcomes);
-    println!("wrote index.html");
+    println!("wrote text_eval.html");
     ExitCode::SUCCESS
 }

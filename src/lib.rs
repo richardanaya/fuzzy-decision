@@ -19,10 +19,24 @@ mod encoding;
 mod questions;
 mod qwen;
 mod tokenize;
+mod vision;
 mod weights;
 
 pub use answers::{Answer, ChoiceAnswer, NoulAnswer, ScoreAnswer};
 pub use questions::{choice, noul, score, Question, Truncation};
+pub use vision::{RgbImage, VisionDecision};
+
+/// Which checkpoint a decision uses.
+///
+/// [`Mode::Text`] is [`FuzzyDecision`]: Kev-4B and its pointer head, text only.
+/// [`Mode::Vision`] is [`VisionDecision`]: Qwen3-VL-4B-Instruct, an image plus text.
+/// The vision checkpoint has no pointer head, so each option is scored by how likely
+/// the model is to write that phrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Text,
+    Vision,
+}
 pub use tokenize::TokenCounter;
 
 use std::collections::BTreeMap;
