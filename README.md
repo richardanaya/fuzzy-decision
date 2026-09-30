@@ -160,7 +160,7 @@ choice(
 
 ## Domain eval
 
-`cargo run --release --example domain_eval` loads `models/kev-4b` and scores a fixed set of professional and everyday classification questions: message intent, document topic, whether a statement follows from a memo, abstaining when the label set does not apply, which team owns a request, expense category, on-call urgency, and sentiment. The latest run is the report in [index.html](index.html): 30 of 32 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
+`cargo run --release --example domain_eval` loads `models/kev-4b` and scores 1000 professional and everyday classification questions across 21 domains, including message intent, document topic, entailment, abstaining, team routing, expenses, urgency, sentiment, news desk, document type, industry, and others. The latest run is the report in [index.html](index.html): 893 of 1000 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
 
 ## Limits
 

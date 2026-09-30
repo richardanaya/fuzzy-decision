@@ -11,326 +11,42 @@ use std::process::{Command, ExitCode};
 
 use fuzzy_decision::{FuzzyDecision, LoadOptions};
 
-enum Ask {
+#[path = "corpus.rs"]
+mod corpus;
+
+#[derive(Clone)]
+pub enum Ask {
     Choice {
-        instructions: &'static str,
-        options: &'static [&'static str],
-        gold: &'static str,
+        instructions: String,
+        options: Vec<String>,
+        gold: String,
     },
     Noul {
-        statement: &'static str,
+        statement: String,
         gold: bool,
     },
     Score {
-        instructions: &'static str,
-        levels: &'static [&'static str],
-        gold: &'static str,
+        instructions: String,
+        levels: Vec<String>,
+        gold: String,
     },
 }
 
-struct Item {
-    domain: &'static str,
-    state: &'static str,
-    ask: Ask,
+#[derive(Clone)]
+pub struct Item {
+    pub domain: String,
+    pub state: String,
+    pub ask: Ask,
 }
 
 struct Outcome {
-    domain: &'static str,
-    state: &'static str,
+    domain: String,
+    state: String,
     question: String,
     gold: String,
     got: String,
     confidence: f32,
     hit: bool,
-}
-
-fn items() -> Vec<Item> {
-    vec![
-        Item {
-            domain: "intent",
-            state: "Can we move Thursday's budget review to Friday at 2pm? I have a client call.",
-            ask: Ask::Choice {
-                instructions: "What is the sender trying to do?",
-                options: &["reschedule a meeting", "request a refund", "share a status update", "none"],
-                gold: "reschedule a meeting",
-            },
-        },
-        Item {
-            domain: "intent",
-            state: "The staging deploy finished. Error rate is flat and the new login page is up.",
-            ask: Ask::Choice {
-                instructions: "What is the sender trying to do?",
-                options: &["reschedule a meeting", "request a refund", "share a status update", "none"],
-                gold: "share a status update",
-            },
-        },
-        Item {
-            domain: "intent",
-            state: "Please send me the signed statement of work before the kickoff.",
-            ask: Ask::Choice {
-                instructions: "What is the sender trying to do?",
-                options: &["request a document", "cancel a subscription", "report an outage", "none"],
-                gold: "request a document",
-            },
-        },
-        Item {
-            domain: "intent",
-            state: "Thanks for the intro. I will read the brief this afternoon.",
-            ask: Ask::Choice {
-                instructions: "What is the sender trying to do?",
-                options: &["request a document", "acknowledge a message", "escalate a complaint", "none"],
-                gold: "acknowledge a message",
-            },
-        },
-        Item {
-            domain: "topic",
-            state: "Q3 revenue was $4.2 million, up 6% from Q2. Gross margin held at 41%.",
-            ask: Ask::Choice {
-                instructions: "Which subject is this paragraph about?",
-                options: &["finance", "hiring", "facilities", "product support"],
-                gold: "finance",
-            },
-        },
-        Item {
-            domain: "topic",
-            state: "We are opening a senior accountant role. Applications close on the 15th.",
-            ask: Ask::Choice {
-                instructions: "Which subject is this paragraph about?",
-                options: &["finance", "hiring", "facilities", "product support"],
-                gold: "hiring",
-            },
-        },
-        Item {
-            domain: "topic",
-            state: "The HVAC unit on the third floor failed overnight. The floor is closed until noon.",
-            ask: Ask::Choice {
-                instructions: "Which subject is this paragraph about?",
-                options: &["finance", "hiring", "facilities", "product support"],
-                gold: "facilities",
-            },
-        },
-        Item {
-            domain: "topic",
-            state: "Customers cannot export CSV from the reports page after yesterday's release.",
-            ask: Ask::Choice {
-                instructions: "Which subject is this paragraph about?",
-                options: &["finance", "hiring", "facilities", "product support"],
-                gold: "product support",
-            },
-        },
-        Item {
-            domain: "entailment",
-            state: "The contract renews on June 1 unless either party gives 30 days' written notice. No notice has been sent.",
-            ask: Ask::Noul {
-                statement: "The contract is set to renew on June 1.",
-                gold: true,
-            },
-        },
-        Item {
-            domain: "entailment",
-            state: "The contract renews on June 1 unless either party gives 30 days' written notice. No notice has been sent.",
-            ask: Ask::Noul {
-                statement: "A party has already cancelled the renewal.",
-                gold: false,
-            },
-        },
-        Item {
-            domain: "entailment",
-            state: "Only managers in the payroll group can approve overtime. Jordan is a designer and is not in that group.",
-            ask: Ask::Noul {
-                statement: "Jordan can approve overtime.",
-                gold: false,
-            },
-        },
-        Item {
-            domain: "entailment",
-            state: "The vendor delivered 80 of the 100 chairs. The remaining 20 ship next Tuesday.",
-            ask: Ask::Noul {
-                statement: "Some of the chairs have not arrived yet.",
-                gold: true,
-            },
-        },
-        Item {
-            domain: "abstain",
-            state: "Please book a conference room for six people on Monday morning.",
-            ask: Ask::Choice {
-                instructions: "Which payroll action is requested? Choose none if the text is not a payroll action.",
-                options: &["run payroll", "correct a tax withholding", "issue a bonus", "none"],
-                gold: "none",
-            },
-        },
-        Item {
-            domain: "abstain",
-            state: "The cafeteria serves soup on Wednesdays.",
-            ask: Ask::Choice {
-                instructions: "Which legal filing does the text request? Choose none if it requests none.",
-                options: &["file a trademark", "send a cease and desist", "none"],
-                gold: "none",
-            },
-        },
-        Item {
-            domain: "abstain",
-            state: "Please correct the tax withholding on my August paycheck.",
-            ask: Ask::Choice {
-                instructions: "Which payroll action is requested? Choose none if the text is not a payroll action.",
-                options: &["run payroll", "correct a tax withholding", "issue a bonus", "none"],
-                gold: "correct a tax withholding",
-            },
-        },
-        Item {
-            domain: "abstain",
-            state: "Attached is the agenda for the design critique.",
-            ask: Ask::Choice {
-                instructions: "Which facilities request is this? Choose none if it is not a facilities request.",
-                options: &["repair the HVAC", "replace a badge", "none"],
-                gold: "none",
-            },
-        },
-        Item {
-            domain: "routing",
-            state: "I was billed twice for the April invoice and I want the duplicate charge returned.",
-            ask: Ask::Choice {
-                instructions: "Which team should own this message?",
-                options: &["billing", "account access", "shipping", "none"],
-                gold: "billing",
-            },
-        },
-        Item {
-            domain: "routing",
-            state: "I cannot sign in. The password reset email never arrives.",
-            ask: Ask::Choice {
-                instructions: "Which team should own this message?",
-                options: &["billing", "account access", "shipping", "none"],
-                gold: "account access",
-            },
-        },
-        Item {
-            domain: "routing",
-            state: "The tracking page still shows my order sitting at the warehouse from last week.",
-            ask: Ask::Choice {
-                instructions: "Which team should own this message?",
-                options: &["billing", "account access", "shipping", "none"],
-                gold: "shipping",
-            },
-        },
-        Item {
-            domain: "routing",
-            state: "What time does the downtown shop close on Sundays?",
-            ask: Ask::Choice {
-                instructions: "Which team should own this message? Choose none if none of these teams own it.",
-                options: &["billing", "account access", "shipping", "none"],
-                gold: "none",
-            },
-        },
-        Item {
-            domain: "expense",
-            state: "Uber from the airport to the client office, $46, March 2.",
-            ask: Ask::Choice {
-                instructions: "Which expense category is this?",
-                options: &["ground transport", "lodging", "meals", "software", "none"],
-                gold: "ground transport",
-            },
-        },
-        Item {
-            domain: "expense",
-            state: "Two nights at the Harbor Hotel during the Seattle offsite, $380.",
-            ask: Ask::Choice {
-                instructions: "Which expense category is this?",
-                options: &["ground transport", "lodging", "meals", "software", "none"],
-                gold: "lodging",
-            },
-        },
-        Item {
-            domain: "expense",
-            state: "Annual seat for the design tool, billed to the company card.",
-            ask: Ask::Choice {
-                instructions: "Which expense category is this?",
-                options: &["ground transport", "lodging", "meals", "software", "none"],
-                gold: "software",
-            },
-        },
-        Item {
-            domain: "expense",
-            state: "Team lunch after the customer workshop, $96 including tip.",
-            ask: Ask::Choice {
-                instructions: "Which expense category is this?",
-                options: &["ground transport", "lodging", "meals", "software", "none"],
-                gold: "meals",
-            },
-        },
-        Item {
-            domain: "priority",
-            state: "A typo in the footer of the monthly newsletter. The send already went out.",
-            ask: Ask::Score {
-                instructions: "How urgent is this for the on-call team?",
-                levels: &["low", "medium", "high", "urgent"],
-                gold: "low",
-            },
-        },
-        Item {
-            domain: "priority",
-            state: "Checkout has failed for every customer for the last 40 minutes. No orders are completing.",
-            ask: Ask::Score {
-                instructions: "How urgent is this for the on-call team?",
-                levels: &["low", "medium", "high", "urgent"],
-                gold: "urgent",
-            },
-        },
-        Item {
-            domain: "priority",
-            state: "Search is slow for some users, about three seconds, and results are still correct.",
-            ask: Ask::Score {
-                instructions: "How urgent is this for the on-call team?",
-                levels: &["low", "medium", "high", "urgent"],
-                gold: "medium",
-            },
-        },
-        Item {
-            domain: "priority",
-            state: "New signups in one region are erroring. Other regions are fine. Support volume is rising.",
-            ask: Ask::Score {
-                instructions: "How urgent is this for the on-call team?",
-                levels: &["low", "medium", "high", "urgent"],
-                gold: "high",
-            },
-        },
-        Item {
-            domain: "sentiment",
-            state: "This is the clearest onboarding I have used. I had my team invited the same day.",
-            ask: Ask::Score {
-                instructions: "How positive is this message?",
-                levels: &["very negative", "negative", "neutral", "positive", "very positive"],
-                gold: "very positive",
-            },
-        },
-        Item {
-            domain: "sentiment",
-            state: "Support never replied, and the invoice was wrong for the second month in a row.",
-            ask: Ask::Score {
-                instructions: "How positive is this message?",
-                levels: &["very negative", "negative", "neutral", "positive", "very positive"],
-                gold: "very negative",
-            },
-        },
-        Item {
-            domain: "sentiment",
-            state: "The office address is 400 Market Street. Reception is on the second floor.",
-            ask: Ask::Score {
-                instructions: "How positive is this message?",
-                levels: &["very negative", "negative", "neutral", "positive", "very positive"],
-                gold: "neutral",
-            },
-        },
-        Item {
-            domain: "sentiment",
-            state: "The workshop was useful. The room was crowded, but the material was solid.",
-            ask: Ask::Score {
-                instructions: "How positive is this message?",
-                levels: &["very negative", "negative", "neutral", "positive", "very positive"],
-                gold: "positive",
-            },
-        },
-    ]
 }
 
 fn esc(text: &str) -> String {
@@ -342,7 +58,7 @@ fn esc(text: &str) -> String {
 fn write_report(outcomes: &[Outcome]) {
     let mut by_domain: BTreeMap<&str, (usize, usize, f32)> = BTreeMap::new();
     for outcome in outcomes {
-        let slot = by_domain.entry(outcome.domain).or_insert((0, 0, 0.0));
+        let slot = by_domain.entry(outcome.domain.as_str()).or_insert((0, 0, 0.0));
         slot.0 += 1;
         if outcome.hit {
             slot.1 += 1;
@@ -380,8 +96,8 @@ fn write_report(outcomes: &[Outcome]) {
         miss_count += 1;
         miss_rows.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"miss\">{}</td><td class=\"num\">{:.2}</td></tr>\n",
-            esc(outcome.domain),
-            esc(outcome.state),
+            esc(&outcome.domain),
+            esc(&outcome.state),
             esc(&outcome.question),
             esc(&outcome.gold),
             esc(&outcome.got),
@@ -397,8 +113,8 @@ fn write_report(outcomes: &[Outcome]) {
         let mark = if outcome.hit { "hit" } else { "miss" };
         item_rows.push_str(&format!(
             "<tr><td class=\"{mark}\">{mark}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"num\">{:.2}</td></tr>\n",
-            esc(outcome.domain),
-            esc(outcome.state),
+            esc(&outcome.domain),
+            esc(&outcome.state),
             esc(&outcome.question),
             esc(&outcome.gold),
             esc(&outcome.got),
@@ -442,8 +158,8 @@ fn write_report(outcomes: &[Outcome]) {
   </header>
 
   <h2>What was measured</h2>
-  <p>The checkpoint is the Kev-4B Qwen3 revision, loaded from <code>models/kev-4b</code>. Eight domains, four items each. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items (priority and sentiment) count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
-  <p>The domains are message intent, document topic, whether a statement follows from a memo, refusing a label set that does not apply, which team owns a request, expense category, on-call urgency, and how positive a message is.</p>
+  <p>The checkpoint is the Kev-4B Qwen3 revision, loaded from <code>models/kev-4b</code>. {domain_count} domains, {total_n} items. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
+  <p>Domains: {domain_list}. Some situations are repeated with a short filing prefix so the set reaches 1000 items. The label does not change.</p>
 
   <h2>Results by domain</h2>
   <table>
@@ -484,6 +200,8 @@ fn write_report(outcomes: &[Outcome]) {
         acc = total_hit as f32 / total_n as f32,
         pct = total_hit as f32 / total_n as f32 * 100.0,
         overall_width = total_hit as f32 / total_n as f32 * 100.0,
+        domain_count = by_domain.len(),
+        domain_list = esc(&by_domain.keys().copied().collect::<Vec<_>>().join(", ")),
         domain_rows = domain_rows,
         miss_rows = miss_rows,
         item_rows = item_rows,
@@ -514,22 +232,25 @@ fn main() -> ExitCode {
     };
 
     let mut outcomes = Vec::new();
-    for item in items() {
+    let bank = corpus::build();
+    eprintln!("items {}", bank.len());
+    for (index, item) in bank.into_iter().enumerate() {
         let (question, gold, got, confidence, hit) = match &item.ask {
             Ask::Choice { instructions, options, gold } => {
-                let answer = decider.choice(item.state, *instructions, options).unwrap_or_else(|err| panic!("{err}"));
+                let opts: Vec<&str> = options.iter().map(String::as_str).collect();
+                let answer = decider.choice(&item.state, instructions, &opts).unwrap_or_else(|err| panic!("{err}"));
                 (
-                    (*instructions).to_string(),
-                    (*gold).to_string(),
+                    instructions.clone(),
+                    gold.clone(),
                     answer.choice.clone(),
                     answer.confidence,
                     answer.choice == *gold,
                 )
             }
             Ask::Noul { statement, gold } => {
-                let answer = decider.noul(item.state, *statement).unwrap_or_else(|err| panic!("{err}"));
+                let answer = decider.noul(&item.state, statement).unwrap_or_else(|err| panic!("{err}"));
                 (
-                    (*statement).to_string(),
+                    statement.clone(),
                     gold.to_string(),
                     answer.answer.to_string(),
                     answer.confidence,
@@ -537,24 +258,27 @@ fn main() -> ExitCode {
                 )
             }
             Ask::Score { instructions, levels, gold } => {
-                let answer = decider.score(item.state, *instructions, levels).unwrap_or_else(|err| panic!("{err}"));
+                let levels_ref: Vec<&str> = levels.iter().map(String::as_str).collect();
+                let answer = decider.score(&item.state, instructions, &levels_ref).unwrap_or_else(|err| panic!("{err}"));
                 (
-                    (*instructions).to_string(),
-                    (*gold).to_string(),
+                    instructions.clone(),
+                    gold.clone(),
                     format!("{} ({:.2})", answer.level, answer.score),
                     answer.confidence,
                     answer.level == *gold,
                 )
             }
         };
-        println!(
-            "{}  {}  gold={}  got={}  conf={:.2}",
-            if hit { "hit " } else { "miss" },
-            item.domain,
-            gold,
-            got,
-            confidence
-        );
+        if index % 50 == 0 || !hit {
+            println!(
+                "{index:>4} {}  {}  gold={}  got={}  conf={:.2}",
+                if hit { "hit " } else { "miss" },
+                item.domain,
+                gold,
+                got,
+                confidence
+            );
+        }
         outcomes.push(Outcome {
             domain: item.domain,
             state: item.state,
