@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "fuzzy-decision"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "burn",
  "safetensors 0.4.5",
