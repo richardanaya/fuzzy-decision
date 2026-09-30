@@ -1,0 +1,17 @@
+[package]
+name = "fuzzy-decision"
+version = "0.1.0"
+edition = "2021"
+description = "Typed decisions (choice, score, noul) scored on Burn's WGPU backend."
+authors = ["Richard Anaya"]
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu"] }
+safetensors = "0.4"
+thiserror = "2"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
+[dev-dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu"] }
