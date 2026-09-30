@@ -14,6 +14,7 @@
 #![recursion_limit = "256"]
 
 mod answers;
+#[cfg(test)]
 mod encoding;
 mod questions;
 mod qwen;

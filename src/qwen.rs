@@ -7,12 +7,9 @@ use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::{Tensor, TensorData};
 
-const HIDDEN: usize = 1024;
-const LAYERS: usize = 28;
 const HEADS: usize = 16;
 const KV_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
-const INTERMEDIATE: usize = 3072;
 const RMS_EPS: f32 = 1e-6;
 const ROPE_THETA: f32 = 1_000_000.0;
 const POINTER_DIM: usize = 256;
@@ -87,10 +84,6 @@ impl Qwen3Kev {
         layers.into_iter().map(LayerParts::into_layer).collect()
     }
 
-    pub fn device(&self) -> &WgpuDevice {
-        &self.device
-    }
-
     /// One logit per option, grouped by question.
     pub fn score(&self, packed: &Packed, user_temperature: f32) -> Vec<Vec<f32>> {
         let hidden = self.backbone(packed);
@@ -159,7 +152,7 @@ mod layer_ctor {
         pub post_norm: Tensor<Wgpu, 1>,
     }
     impl LayerParts {
-        pub fn into_layer(self) -> Layer {
+        pub(super) fn into_layer(self) -> Layer {
             Layer {
                 q: self.q,
                 k: self.k,

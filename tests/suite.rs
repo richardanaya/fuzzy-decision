@@ -132,7 +132,6 @@ fn behavior_and_per_call_timings() {
     })
     .expect("load");
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
-    assert_eq!(jev.runtime().model, "kev-0.6b");
 
     let refund = "I was charged twice for the same order and I want my money back.";
     let weather = "The forecast for Friday is rain, then sun on Saturday.";

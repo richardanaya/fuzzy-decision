@@ -23,6 +23,7 @@ pub struct EncodedSequence {
     pub extra_inputs: ExtraInputs,
     /// Per question: indices into the flat logit vector, one per option.
     pub groups: Vec<Vec<usize>>,
+    #[allow(dead_code)]
     pub state_tokens: usize,
     pub state_truncated: bool,
 }
