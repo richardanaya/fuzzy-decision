@@ -1,8 +1,8 @@
 # fuzzy-decision
 
-`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text questions use Kev-4B. Image questions use Qwen3-VL-4B-Instruct.
+`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text questions use Kev-4B. Image questions use `yah01/vjev-vision`. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads weights from a directory you pass. It does not download them. The crate is MIT. The checkpoints are separate and Apache-2.0.
 
-The loaded checkpoint is **Kev-4B** on its Qwen3 revision: `Qwen/Qwen3-4B-Base`, the LoRA from `jaredpalmer/kev-4b` at revision `qwen3` merged in at load, and that revision's pointer head. The `main` files of `jaredpalmer/kev-4b` are a Qwen3.5 hybrid and do not load. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads those files from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate: `Qwen/Qwen3-4B-Base` and `jaredpalmer/kev-4b` are both Apache-2.0.
+Text mode loads **Kev-4B** on its Qwen3 revision: `Qwen/Qwen3-4B-Base`, the LoRA from `jaredpalmer/kev-4b` at revision `qwen3` merged in at load, and that revision's pointer head. The `main` files of `jaredpalmer/kev-4b` are a Qwen3.5 hybrid and do not load. Vision mode loads `yah01/vjev-vision`: Qwen3.5-4B, its vision tower, and a listwise head that scores every option in one forward pass.
 
 One process holds one loaded model. Later calls reuse it.
 
@@ -10,7 +10,7 @@ One process holds one loaded model. Later calls reuse it.
 
 ```toml
 [dependencies]
-fuzzy-decision = "0.3"
+fuzzy-decision = "0.4"
 ```
 
 A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The weights are stored as f32, so the 4B checkpoint needs several gigabytes of GPU memory. Loading the files and compiling shaders takes longer than it did for the 0.6B checkpoint.
@@ -162,13 +162,13 @@ choice(
 
 Text is the default. [`FuzzyDecision`] loads Kev-4B and scores a typed question with the pointer head. There is no image input.
 
-Vision is [`VisionDecision`]. It loads `Qwen/Qwen3-VL-4B-Instruct` from a directory you prepare (the library does not download it): `tokenizer.json`, `model.safetensors.index.json`, and the two `model-0000N-of-00002.safetensors` shards. Pass an RGB image with the question. The checkpoint has no pointer head, so each option is scored by the probability the model would write that phrase after the picture. `choice`, `noul`, and `score` return the same answer types as the text mode. `Qwen/Qwen3-VL-4B-Instruct` is Apache-2.0.
+Vision is [`VisionDecision`]. It loads `yah01/vjev-vision` from a directory you prepare (the library does not download it): `tokenizer.json`, `vjev.json`, `head.pt`, `model.safetensors.index.json`, and the safetensor shards. The trunk is Qwen3.5-4B with its vision tower. A single linear head reads every option in one forward pass. `choice`, `noul`, and `score` return the same answer types as the text mode. The checkpoint is Apache-2.0.
 
 ```rust
 use fuzzy_decision::{RgbImage, VisionDecision};
 
 fn main() -> Result<(), fuzzy_decision::Error> {
-    let decider = VisionDecision::load("models/qwen3-vl-4b-instruct")?;
+    let decider = VisionDecision::load("models/vjev-vision")?;
     let image = RgbImage {
         width: 320,
         height: 320,
@@ -191,7 +191,7 @@ fn main() -> Result<(), fuzzy_decision::Error> {
 
 ## Image eval
 
-`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `Qwen/Qwen3-VL-4B-Instruct` snapshot and score packed RGB images. The latest run is [image_eval.html](image_eval.html): 19 of 28 generated pictures matched the labeled answer. Subject labels were 12 of 12. Danger, emotion, and action were 7 of 16. Each option is a separate forward pass, so a question with more phrases takes longer. The example does not download weights.
+`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `yah01/vjev-vision` snapshot and score packed RGB images. The latest run is the report in [image_eval.html](image_eval.html): 28 of 28 items matched the labeled answer. The example does not download weights.
 
 ## Limits
 

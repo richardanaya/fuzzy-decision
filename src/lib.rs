@@ -1,9 +1,10 @@
-//! Typed decisions scored with Kev-4B on Burn's WGPU backend.
+//! Typed decisions scored on Burn's WGPU backend.
 //!
-//! One piece of text (the state) and any number of typed questions go in. One
-//! forward pass on Burn's WGPU backend returns a probability distribution per
-//! question. Nothing is generated: an answer is always one of the options you
-//! provided.
+//! Text mode takes one piece of text (the state) and any number of typed
+//! questions. One forward pass returns a probability distribution per question.
+//! Nothing is generated: an answer is always one of the options you provided.
+//! Vision mode takes an image plus text and scores its options with
+//! `yah01/vjev-vision`.
 //!
 //! `kev-4b` runs `Qwen/Qwen3-4B-Base` with the `jaredpalmer/kev-4b` revision
 //! `qwen3` LoRA merged in, and that checkpoint's pointer head. The current
@@ -29,9 +30,8 @@ pub use vision::{RgbImage, VisionDecision};
 /// Which checkpoint a decision uses.
 ///
 /// [`Mode::Text`] is [`FuzzyDecision`]: Kev-4B and its pointer head, text only.
-/// [`Mode::Vision`] is [`VisionDecision`]: Qwen3-VL-4B-Instruct, an image plus text.
-/// The vision checkpoint has no pointer head, so each option is scored by how likely
-/// the model is to write that phrase.
+/// [`Mode::Vision`] is [`VisionDecision`]: `yah01/vjev-vision`, an image plus text,
+/// scored by that checkpoint's listwise head in one forward pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Text,
