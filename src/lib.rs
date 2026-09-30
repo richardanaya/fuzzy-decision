@@ -1,15 +1,15 @@
-//! Typed decisions scored with Kev-0.6B on Burn's WGPU backend.
+//! Typed decisions scored with Kev-4B on Burn's WGPU backend.
 //!
 //! One piece of text (the state) and any number of typed questions go in. One
 //! forward pass on Burn's WGPU backend returns a probability distribution per
 //! question. Nothing is generated: an answer is always one of the options you
 //! provided.
 //!
-//! `kev-0.6b` runs the published checkpoint: `Qwen/Qwen3-0.6B-Base` with the
-//! `jaredpalmer/kev-0.6b` LoRA merged in, and that checkpoint's pointer head.
-//! The forward pass is Burn on the WGPU device. Weights are read from
-//! `models/kev-0.6b` (or `LoadOptions::weights_dir`). The library does not
-//! download them.
+//! `kev-4b` runs `Qwen/Qwen3-4B-Base` with the `jaredpalmer/kev-4b` revision
+//! `qwen3` LoRA merged in, and that checkpoint's pointer head. The current
+//! `main` files of that repo are Qwen3.5 and do not load here. The forward
+//! pass is Burn on the WGPU device. Weights are read from `models/kev-4b`
+//! (or `LoadOptions::weights_dir`). The library does not download them.
 
 #![recursion_limit = "256"]
 
@@ -36,13 +36,13 @@ use qwen::Qwen3Kev;
 use tokenize::HfTokenizer;
 
 /// The only checkpoint [`FuzzyDecision::load`] accepts.
-pub const DEFAULT_MODEL: &str = "kev-0.6b";
+pub const DEFAULT_MODEL: &str = "kev-4b";
 
 /// Base weights. File: `model.safetensors`. License: Apache-2.0.
-pub const BASE_REPO: &str = "Qwen/Qwen3-0.6B-Base";
+pub const BASE_REPO: &str = "Qwen/Qwen3-4B-Base";
 
-/// LoRA, tokenizer, and pointer head. License: Apache-2.0.
-pub const ADAPTER_REPO: &str = "jaredpalmer/kev-0.6b";
+/// LoRA, tokenizer, and pointer head. Use the `qwen3` revision. License: Apache-2.0.
+pub const ADAPTER_REPO: &str = "jaredpalmer/kev-4b";
 
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
@@ -53,7 +53,7 @@ pub struct LoadOptions {
     pub max_state_tokens: Option<usize>,
     pub truncation: Truncation,
     /// Directory with `model.safetensors`, `adapter_model.safetensors`,
-    /// `head.safetensors`, and `tokenizer.json`. Defaults to `models/kev-0.6b`.
+    /// `head.safetensors`, and `tokenizer.json`. Defaults to `models/kev-4b`.
     pub weights_dir: Option<PathBuf>,
 }
 
@@ -71,7 +71,7 @@ impl Default for LoadOptions {
 }
 
 impl LoadOptions {
-    /// Load `kev-0.6b` from `dir`, which holds the four weight files.
+    /// Load `kev-4b` from `dir`, which holds the four weight files.
     pub fn dir(dir: impl Into<PathBuf>) -> Self {
         Self {
             weights_dir: Some(dir.into()),
@@ -197,7 +197,7 @@ pub enum Error {
     Context { message: String },
     #[error("State needs {state_tokens} tokens and only {kept} fit in the context.")]
     Truncated { state_tokens: usize, kept: usize },
-    #[error("only kev-0.6b is implemented, got {model}")]
+    #[error("only kev-4b is implemented, got {model}")]
     UnsupportedModel { model: String },
     #[error("missing {file} in {}", dir.display())]
     MissingFile { dir: PathBuf, file: &'static str },
@@ -225,13 +225,13 @@ fn weights_ready(dir: &Path) -> bool {
 }
 
 impl FuzzyDecision {
-    /// Load Kev-0.6B from `dir`. The directory must already hold the four weight files.
+    /// Load Kev-4B from `dir`. The directory must already hold the four weight files.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
         Self::load(LoadOptions::dir(dir.as_ref()))
     }
 
     pub fn load(options: LoadOptions) -> Result<Self, Error> {
-        if options.model != "kev-0.6b" {
+        if options.model != "kev-4b" {
             return Err(Error::UnsupportedModel {
                 model: options.model,
             });
@@ -487,6 +487,6 @@ mod tests {
         assert_eq!(info.model, DEFAULT_MODEL);
         assert_eq!(info.base_repo, BASE_REPO);
         assert_eq!(info.adapter_repo, ADAPTER_REPO);
-        assert!(info.weights_dir.ends_with("kev-0.6b"));
+        assert!(info.weights_dir.ends_with("kev-4b"));
     }
 }

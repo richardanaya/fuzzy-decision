@@ -1,4 +1,4 @@
-//! Load `Qwen/Qwen3-0.6B-Base`, merge the Kev-0.6B LoRA, and attach the pointer head.
+//! Load `Qwen/Qwen3-4B-Base`, merge the Kev-4B LoRA, and attach the pointer head.
 
 use std::path::{Path, PathBuf};
 
@@ -9,11 +9,11 @@ use safetensors::SafeTensors;
 
 use crate::qwen::{LayerParts, Qwen3Kev};
 
-const LAYERS: usize = 28;
+const LAYERS: usize = 36;
 const LORA_SCALE: f32 = 2.0;
 
 pub fn default_weights_dir() -> PathBuf {
-    PathBuf::from("models/kev-0.6b")
+    PathBuf::from("models/kev-4b")
 }
 
 pub fn load_kev(dir: &Path, device: &WgpuDevice) -> Result<Qwen3Kev, String> {

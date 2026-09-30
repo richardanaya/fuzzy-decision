@@ -1,13 +1,13 @@
-//! API checks that do not load the 0.6B checkpoint.
-//! The forward pass is covered by `tests/kev_forward.rs` when `models/kev-0.6b` is present.
+//! API checks that do not load the 4B checkpoint.
+//! The forward pass is covered by `tests/kev_forward.rs` when `models/kev-4b` is present.
 
 use fuzzy_decision::{FuzzyDecision, LoadOptions, ADAPTER_REPO, BASE_REPO, DEFAULT_MODEL};
 
 #[test]
 fn checkpoint_names_match_the_weight_files() {
-    assert_eq!(DEFAULT_MODEL, "kev-0.6b");
-    assert_eq!(BASE_REPO, "Qwen/Qwen3-0.6B-Base");
-    assert_eq!(ADAPTER_REPO, "jaredpalmer/kev-0.6b");
+    assert_eq!(DEFAULT_MODEL, "kev-4b");
+    assert_eq!(BASE_REPO, "Qwen/Qwen3-4B-Base");
+    assert_eq!(ADAPTER_REPO, "jaredpalmer/kev-4b");
 }
 
 #[test]
@@ -30,5 +30,5 @@ fn only_kev_0_6b_loads() {
     })
     .unwrap_err();
     let message = err.to_string();
-    assert!(message.contains("kev-0.6b"), "{message}");
+    assert!(message.contains("kev-4b"), "{message}");
 }

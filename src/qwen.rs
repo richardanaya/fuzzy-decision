@@ -1,13 +1,13 @@
-//! Qwen3-0.6B backbone and the Kev pointer head, executed on Burn's WGPU backend.
+//! Qwen3-4B backbone and the Kev pointer head, executed on Burn's WGPU backend.
 //!
-//! Weights come from `Qwen/Qwen3-0.6B-Base` with the `jaredpalmer/kev-0.6b`
-//! LoRA merged in, plus that checkpoint's pointer head.
+//! Weights come from `Qwen/Qwen3-4B-Base` with the `jaredpalmer/kev-4b` revision
+//! `qwen3` LoRA merged in, plus that checkpoint's pointer head.
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::{Tensor, TensorData};
 
-const HEADS: usize = 16;
+const HEADS: usize = 32;
 const KV_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
 const RMS_EPS: f32 = 1e-6;

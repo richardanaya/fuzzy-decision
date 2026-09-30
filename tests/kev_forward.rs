@@ -1,12 +1,12 @@
-//! One forward pass of the published Kev-0.6B weights on WGPU.
-//! Skips when `models/kev-0.6b` has not been downloaded.
+//! One forward pass of the Kev-4B Qwen3 revision on WGPU.
+//! Skips when `models/kev-4b` has not been downloaded.
 
 use std::path::Path;
 
 use fuzzy_decision::{choice, noul, score, Answer, DecideOptions, LoadOptions, FuzzyDecision};
 
 fn weights_dir() -> &'static Path {
-    Path::new("models/kev-0.6b")
+    Path::new("models/kev-4b")
 }
 
 fn ready() -> bool {
@@ -19,14 +19,14 @@ fn ready() -> bool {
 #[test]
 fn kev_0_6b_scores_a_typed_question() {
     if !ready() {
-        eprintln!("skipping: models/kev-0.6b is not downloaded");
+        eprintln!("skipping: models/kev-4b is not downloaded");
         return;
     }
     let jev = FuzzyDecision::load(LoadOptions {
         weights_dir: Some(weights_dir().to_path_buf()),
         ..LoadOptions::default()
     })
-    .expect("load kev-0.6b");
+    .expect("load kev-4b");
 
     let answers = jev
         .decide(

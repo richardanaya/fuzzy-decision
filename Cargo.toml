@@ -1,6 +1,6 @@
 [package]
 name = "fuzzy-decision"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Typed decisions (choice, score, noul) scored on Burn's WGPU backend."
 authors = ["Richard Anaya"]

@@ -1,4 +1,4 @@
-//! Behavior and per-call timings for Kev-0.6B on Burn WGPU.
+//! Behavior and per-call timings for Kev-4B on Burn WGPU.
 //! One process loads the checkpoint once. Each `decide` is timed on the wall clock,
 //! which includes packing, the GPU forward, and reading the logits back.
 
@@ -11,7 +11,7 @@ use fuzzy_decision::{
 };
 
 fn weights_dir() -> &'static Path {
-    Path::new("models/kev-0.6b")
+    Path::new("models/kev-4b")
 }
 
 fn ready() -> bool {
@@ -120,7 +120,7 @@ fn words(n: usize) -> String {
 #[test]
 fn behavior_and_per_call_timings() {
     if !ready() {
-        eprintln!("skipping: models/kev-0.6b is not downloaded");
+        eprintln!("skipping: models/kev-4b is not downloaded");
         return;
     }
 

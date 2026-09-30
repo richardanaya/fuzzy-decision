@@ -2,7 +2,7 @@
 
 `fuzzy-decision` scores a piece of text against questions you write. Each answer is a probability over the options you supplied. The model does not write new text.
 
-The loaded checkpoint is **Kev-0.6B**: `Qwen/Qwen3-0.6B-Base`, the LoRA from `jaredpalmer/kev-0.6b` merged in at load, and that repo's pointer head. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads those files from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate: `Qwen/Qwen3-0.6B-Base` and `jaredpalmer/kev-0.6b` are both Apache-2.0.
+The loaded checkpoint is **Kev-4B** on its Qwen3 revision: `Qwen/Qwen3-4B-Base`, the LoRA from `jaredpalmer/kev-4b` at revision `qwen3` merged in at load, and that revision's pointer head. The `main` files of `jaredpalmer/kev-4b` are a Qwen3.5 hybrid and do not load. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads those files from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate: `Qwen/Qwen3-4B-Base` and `jaredpalmer/kev-4b` are both Apache-2.0.
 
 One process holds one loaded model. Later calls reuse it.
 
@@ -10,46 +10,46 @@ One process holds one loaded model. Later calls reuse it.
 
 ```toml
 [dependencies]
-fuzzy-decision = "0.1"
+fuzzy-decision = "0.2"
 ```
 
-A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). Loading the files and compiling shaders takes a few seconds, and a short question is about 160 ms.
+A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The weights are stored as f32, so the 4B checkpoint needs several gigabytes of GPU memory. Loading the files and compiling shaders takes longer than it did for the 0.6B checkpoint.
 
 ## Weights
 
-Put these four files in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/kev-0.6b` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
+Put these four files in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/kev-4b` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
 
 | File in that directory | Exact URL |
 | --- | --- |
-| `model.safetensors` | https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/main/model.safetensors |
-| `adapter_model.safetensors` | https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/adapter_model.safetensors |
-| `tokenizer.json` | https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/tokenizer.json |
-| `head.safetensors` | built from https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/head.pt |
+| `model.safetensors` | https://huggingface.co/Qwen/Qwen3-4B-Base/resolve/main/model.safetensors |
+| `adapter_model.safetensors` | https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/adapter_model.safetensors |
+| `tokenizer.json` | https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/tokenizer.json |
+| `head.safetensors` | built from https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/head.pt |
 
-`model.safetensors` is the base model, about 1.2 GB, from [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base). The adapter and the tokenizer come from [jaredpalmer/kev-0.6b](https://huggingface.co/jaredpalmer/kev-0.6b). That repo publishes the pointer head as `head.pt`, a PyTorch zip. This crate reads `head.safetensors` with four float32 tensors: `q.weight` and `k.weight` shaped `[256, 1024]`, and `q.bias` and `k.bias` shaped `[256]`.
+`model.safetensors` is the base model, about 8 GB, from [Qwen/Qwen3-4B-Base](https://huggingface.co/Qwen/Qwen3-4B-Base). The adapter and the tokenizer come from revision `qwen3` of [jaredpalmer/kev-4b](https://huggingface.co/jaredpalmer/kev-4b). That revision publishes the pointer head as `head.pt`, a PyTorch zip. This crate reads `head.safetensors` with four float32 tensors: `q.weight` and `k.weight` shaped `[256, 2560]`, and `q.bias` and `k.bias` shaped `[256]`. The LoRA rank is 16 and `lora_alpha` is 32, so the merge scale is 2.
 
 Fetch them from the application that embeds this library, once, before the first `open`. The library never calls the network.
 
 ```bash
-DIR=models/kev-0.6b
+DIR=models/kev-4b
 mkdir -p "$DIR"
 curl -L --fail -o "$DIR/model.safetensors" \
-  https://huggingface.co/Qwen/Qwen3-0.6B-Base/resolve/main/model.safetensors
+  https://huggingface.co/Qwen/Qwen3-4B-Base/resolve/main/model.safetensors
 curl -L --fail -o "$DIR/adapter_model.safetensors" \
-  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/adapter_model.safetensors
+  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/adapter_model.safetensors
 curl -L --fail -o "$DIR/tokenizer.json" \
-  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/tokenizer.json
+  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/tokenizer.json
 curl -L --fail -o "$DIR/head.pt" \
-  https://huggingface.co/jaredpalmer/kev-0.6b/resolve/main/head.pt
+  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/head.pt
 python3 - "$DIR" << 'PY'
 import json, struct, sys, zipfile
 from pathlib import Path
 directory = Path(sys.argv[1])
 archive = zipfile.ZipFile(directory / "head.pt")
 specs = [
-    ("q.weight", "head/data/0", [256, 1024]),
+    ("q.weight", "head/data/0", [256, 2560]),
     ("q.bias", "head/data/1", [256]),
-    ("k.weight", "head/data/2", [256, 1024]),
+    ("k.weight", "head/data/2", [256, 2560]),
     ("k.bias", "head/data/3", [256]),
 ]
 header, offset, blobs = {}, 0, []
@@ -69,7 +69,7 @@ PY
 
 Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or set `LoadOptions { weights_dir: Some(path), .. }`. Do not commit the files.
 
-Only `kev-0.6b` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`. Weights are `f32` on the default WGPU device.
+Only `kev-4b` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`. Weights are `f32` on the default WGPU device.
 
 ## One question
 
@@ -77,7 +77,7 @@ Only `kev-0.6b` loads. Any other `LoadOptions.model` returns `Error::Unsupported
 use fuzzy_decision::FuzzyDecision;
 
 fn main() -> Result<(), fuzzy_decision::Error> {
-    let decider = FuzzyDecision::open("models/kev-0.6b")?;
+    let decider = FuzzyDecision::open("models/kev-4b")?;
     let state = "I was charged twice and I want my money back.";
 
     let refund = decider.noul(state, "The customer is asking for a refund.")?;
@@ -119,7 +119,7 @@ The same state and the same options return the same answer. The library does not
 ```rust
 use fuzzy_decision::{choice, noul, score, Answer, DecideOptions, FuzzyDecision};
 
-let decider = FuzzyDecision::open("models/kev-0.6b")?;
+let decider = FuzzyDecision::open("models/kev-4b")?;
 let state = "I was charged twice and I want my money back.";
 let answers = decider.decide(
     state,
@@ -213,7 +213,7 @@ let sharp = decider.choice_with(
 | Error | When |
 | --- | --- |
 | `MissingFile` | `model.safetensors`, `adapter_model.safetensors`, `head.safetensors`, or `tokenizer.json` is not in the directory |
-| `UnsupportedModel` | `model` is not `kev-0.6b` |
+| `UnsupportedModel` | `model` is not `kev-4b` |
 | `Weights` | a file is present but the tensors cannot be read |
 | `EmptyInstructions` | instructions are blank |
 | `BadOption` | an option or level is blank |
