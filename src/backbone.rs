@@ -331,7 +331,7 @@ impl Backbone {
         for layer in &tower.layers {
             hidden = vision_block(hidden, layer, &cos, &sin);
         }
-        Ok(merge(&hidden, &tower.merger, &self.device))
+        Ok(merge(&hidden, &tower.merger))
     }
 
     fn position_embed(&self, tower: &Tower, grid_h: usize, grid_w: usize) -> Tensor<Wgpu, 2> {
@@ -377,14 +377,7 @@ impl Backbone {
     ) -> (Tensor<Wgpu, 2>, Vec<Carry>) {
         let mut carries = Vec::with_capacity(self.blocks.len());
         for (index, block) in self.blocks.iter().enumerate() {
-            let (next, carry) = step_block(
-                block,
-                hidden,
-                cos,
-                sin,
-                past.map(|item| &item[index]),
-                &self.device,
-            );
+            let (next, carry) = step_block(block, hidden, cos, sin, past.map(|item| &item[index]));
             hidden = next;
             carries.push(carry);
         }
@@ -425,7 +418,6 @@ fn step_block(
     cos: &Tensor<Wgpu, 2>,
     sin: &Tensor<Wgpu, 2>,
     past: Option<&Carry>,
-    device: &WgpuDevice,
 ) -> (Tensor<Wgpu, 2>, Carry) {
     match (block, past) {
         (Block::Linear(layer), Some(Carry::Linear { mixed_tail, state })) => {
@@ -606,7 +598,6 @@ fn full_block(
     let k = rope_partial(rms_heads(k, &layer.k_norm), cos, sin);
     let k = repeat_kv(k);
     let v = repeat_kv(v);
-    let past_len = past.map(|(key, _)| key.dims()[1]).unwrap_or(0);
     let k_all = match past {
         Some((past_k, _)) => Tensor::cat(vec![past_k.clone(), k.clone()], 1),
         None => k.clone(),
@@ -615,7 +606,6 @@ fn full_block(
         Some((_, past_v)) => Tensor::cat(vec![past_v.clone(), v.clone()], 1),
         None => v.clone(),
     };
-    let _ = past_len;
     let mixed = attention(
         q.unsqueeze_dim::<4>(0),
         k_all.clone().unsqueeze_dim::<4>(0),
@@ -741,7 +731,7 @@ fn vision_rope(grid_h: usize, grid_w: usize, device: &WgpuDevice) -> (Tensor<Wgp
     )
 }
 
-fn merge(hidden: &Tensor<Wgpu, 2>, merger: &Merger, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
+fn merge(hidden: &Tensor<Wgpu, 2>, merger: &Merger) -> Tensor<Wgpu, 2> {
     let seq = hidden.dims()[0];
     let groups = seq / (MERGE * MERGE);
     let wide = layer_norm(hidden.clone(), &merger.norm_w, &merger.norm_b)
@@ -843,17 +833,6 @@ pub fn mrope(positions: &[[i32; 3]], device: &WgpuDevice) -> (Tensor<Wgpu, 2>, T
         Tensor::from_data(TensorData::new(cos, [positions.len(), ROTARY]), device),
         Tensor::from_data(TensorData::new(sin, [positions.len(), ROTARY]), device),
     )
-}
-
-fn causal_mask_from(past: usize, seq: usize, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
-    let total = past + seq;
-    let mut mask = vec![0f32; seq * total];
-    for i in 0..seq {
-        for j in (past + i + 1)..total {
-            mask[i * total + j] = f32::NEG_INFINITY;
-        }
-    }
-    Tensor::from_data(TensorData::new(mask, [seq, total]), device)
 }
 
 fn linear2(x: &Tensor<Wgpu, 2>, weight: &Tensor<Wgpu, 2>, bias: Option<&Tensor<Wgpu, 1>>) -> Tensor<Wgpu, 2> {
