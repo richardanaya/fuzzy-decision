@@ -16,6 +16,7 @@
 
 mod answers;
 mod backbone;
+mod delta;
 mod clef;
 mod head;
 #[cfg(test)]

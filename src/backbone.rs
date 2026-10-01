@@ -2,15 +2,18 @@
 //! WGPU device.
 //!
 //! The language model interleaves gated-delta linear-attention layers with a
-//! full-attention layer every fourth block. The linear-attention recurrence
-//! runs on the CPU in f32; the projections, full attention, and MLPs run on
-//! the GPU. Weights are read from the sharded `model-*.safetensors` files of a
-//! local `Cloudflare/clef-flash` snapshot.
+//! full-attention layer every fourth block. The recurrence is one GPU kernel
+//! per layer. Projections, full attention, and MLPs stay on the WGPU device.
+//! Weights are read from the sharded `model-*.safetensors` files of a local
+//! `Cloudflare/clef-flash` snapshot.
 
 use std::path::Path;
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::tensor::activation::{sigmoid, softmax};
+use burn::tensor::activation::{gelu, sigmoid, softmax};
+use burn::tensor::module::attention;
+use burn::tensor::ops::AttentionModuleOptions;
+use burn::tensor::FloatDType;
 use burn::tensor::{Tensor, TensorData};
 
 use crate::weights::{Bf16Table, Store};
@@ -24,8 +27,8 @@ const TEXT_HEAD_DIM: usize = 256;
 const TEXT_GROUP: usize = TEXT_HEADS / TEXT_KV;
 const ROTARY: usize = 64;
 const K_HEADS: usize = 16;
-const V_HEADS: usize = 32;
-const LIN_DIM: usize = 128;
+pub(crate) const V_HEADS: usize = 32;
+pub(crate) const LIN_DIM: usize = 128;
 const KEY_DIM: usize = K_HEADS * LIN_DIM;
 const VALUE_DIM: usize = V_HEADS * LIN_DIM;
 const CONV_DIM: usize = KEY_DIM * 2 + VALUE_DIM;
@@ -47,14 +50,12 @@ enum Block {
 }
 
 struct LinearBlock {
-    qkv: Tensor<Wgpu, 2>,
-    z: Tensor<Wgpu, 2>,
-    a: Tensor<Wgpu, 2>,
-    b: Tensor<Wgpu, 2>,
-    conv: Vec<f32>,
-    a_log: Vec<f32>,
-    dt_bias: Vec<f32>,
-    norm: Vec<f32>,
+    /// `qkv`, `z`, `a`, and `b` stacked on the output axis so one matmul reads the input.
+    in_proj: Tensor<Wgpu, 2>,
+    conv: Tensor<Wgpu, 2>,
+    a_log: Tensor<Wgpu, 1>,
+    dt_bias: Tensor<Wgpu, 1>,
+    norm: Tensor<Wgpu, 1>,
     out: Tensor<Wgpu, 2>,
     input_norm: Tensor<Wgpu, 1>,
     post_norm: Tensor<Wgpu, 1>,
@@ -111,7 +112,10 @@ struct Tower {
 
 /// Per-layer state after a prefix, so a suffix can continue the pass.
 pub enum Carry {
-    Linear { mixed_tail: Vec<f32>, state: Vec<f32> },
+    Linear {
+        mixed_tail: Tensor<Wgpu, 2>,
+        state: Tensor<Wgpu, 3>,
+    },
     Full { k: Tensor<Wgpu, 3>, v: Tensor<Wgpu, 3> },
 }
 
@@ -207,18 +211,20 @@ impl Backbone {
                         conv[channel * CONV_K + tap] = conv_values[channel * kernel + tap];
                     }
                 }
-                let (a_log, _) = store.read(&format!("{prefix}.linear_attn.A_log"))?;
-                let (dt_bias, _) = store.read(&format!("{prefix}.linear_attn.dt_bias"))?;
-                let (norm, _) = store.read(&format!("{prefix}.linear_attn.norm.weight"))?;
+                let conv = Tensor::from_data(TensorData::new(conv, [CONV_DIM, CONV_K]), device);
+                let (a_log, a_shape) = store.read(&format!("{prefix}.linear_attn.A_log"))?;
+                let (dt_bias, dt_shape) = store.read(&format!("{prefix}.linear_attn.dt_bias"))?;
+                let (norm, norm_shape) = store.read(&format!("{prefix}.linear_attn.norm.weight"))?;
+                let qkv = matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_qkv.weight"), device)?;
+                let z = matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_z.weight"), device)?;
+                let a = matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_a.weight"), device)?;
+                let b = matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_b.weight"), device)?;
                 blocks.push(Block::Linear(LinearBlock {
-                    qkv: matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_qkv.weight"), device)?,
-                    z: matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_z.weight"), device)?,
-                    a: matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_a.weight"), device)?,
-                    b: matrix(&mut store, &format!("{prefix}.linear_attn.in_proj_b.weight"), device)?,
+                    in_proj: Tensor::cat(vec![qkv, z, a, b], 0),
                     conv,
-                    a_log,
-                    dt_bias,
-                    norm,
+                    a_log: Tensor::from_data(TensorData::new(a_log, [a_shape[0]]), device),
+                    dt_bias: Tensor::from_data(TensorData::new(dt_bias, [dt_shape[0]]), device),
+                    norm: Tensor::from_data(TensorData::new(norm, [norm_shape[0]]), device),
                     out: matrix(&mut store, &format!("{prefix}.linear_attn.out_proj.weight"), device)?,
                     input_norm,
                     post_norm,
@@ -248,22 +254,22 @@ impl Backbone {
                     norm1_b: vector(&mut store, &format!("{prefix}.norm1.bias"), device)?,
                     norm2_w: vector(&mut store, &format!("{prefix}.norm2.weight"), device)?,
                     norm2_b: vector(&mut store, &format!("{prefix}.norm2.bias"), device)?,
-                    qkv_w: matrix(&mut store, &format!("{prefix}.attn.qkv.weight"), device)?,
+                    qkv_w: matrix_f32(&mut store, &format!("{prefix}.attn.qkv.weight"), device)?,
                     qkv_b: vector(&mut store, &format!("{prefix}.attn.qkv.bias"), device)?,
-                    proj_w: matrix(&mut store, &format!("{prefix}.attn.proj.weight"), device)?,
+                    proj_w: matrix_f32(&mut store, &format!("{prefix}.attn.proj.weight"), device)?,
                     proj_b: vector(&mut store, &format!("{prefix}.attn.proj.bias"), device)?,
-                    fc1_w: matrix(&mut store, &format!("{prefix}.mlp.linear_fc1.weight"), device)?,
+                    fc1_w: matrix_f32(&mut store, &format!("{prefix}.mlp.linear_fc1.weight"), device)?,
                     fc1_b: vector(&mut store, &format!("{prefix}.mlp.linear_fc1.bias"), device)?,
-                    fc2_w: matrix(&mut store, &format!("{prefix}.mlp.linear_fc2.weight"), device)?,
+                    fc2_w: matrix_f32(&mut store, &format!("{prefix}.mlp.linear_fc2.weight"), device)?,
                     fc2_b: vector(&mut store, &format!("{prefix}.mlp.linear_fc2.bias"), device)?,
                 });
             }
             let merger = Merger {
                 norm_w: vector(&mut store, "model.visual.merger.norm.weight", device)?,
                 norm_b: vector(&mut store, "model.visual.merger.norm.bias", device)?,
-                fc1_w: matrix(&mut store, "model.visual.merger.linear_fc1.weight", device)?,
+                fc1_w: matrix_f32(&mut store, "model.visual.merger.linear_fc1.weight", device)?,
                 fc1_b: vector(&mut store, "model.visual.merger.linear_fc1.bias", device)?,
-                fc2_w: matrix(&mut store, "model.visual.merger.linear_fc2.weight", device)?,
+                fc2_w: matrix_f32(&mut store, "model.visual.merger.linear_fc2.weight", device)?,
                 fc2_b: vector(&mut store, "model.visual.merger.linear_fc2.bias", device)?,
             };
             Some(Tower {
@@ -391,11 +397,18 @@ impl Backbone {
 }
 
 fn matrix(store: &mut Store, name: &str, device: &WgpuDevice) -> Result<Tensor<Wgpu, 2>, String> {
+    Ok(matrix_f32(store, name, device)?.cast(FloatDType::F16))
+}
+
+fn matrix_f32(store: &mut Store, name: &str, device: &WgpuDevice) -> Result<Tensor<Wgpu, 2>, String> {
     let (values, shape) = store.read(name)?;
     if shape.len() != 2 {
         return Err(format!("{name} has shape {shape:?}"));
     }
-    Ok(Tensor::from_data(TensorData::new(values, [shape[0], shape[1]]), device))
+    Ok(Tensor::from_data(
+        TensorData::new(values, [shape[0], shape[1]]),
+        device,
+    ))
 }
 
 fn vector(store: &mut Store, name: &str, device: &WgpuDevice) -> Result<Tensor<Wgpu, 1>, String> {
@@ -416,15 +429,12 @@ fn step_block(
 ) -> (Tensor<Wgpu, 2>, Carry) {
     match (block, past) {
         (Block::Linear(layer), Some(Carry::Linear { mixed_tail, state })) => {
-            linear_block(hidden, layer, device, mixed_tail, state)
+            linear_block(hidden, layer, Some(mixed_tail), state.clone())
         }
-        (Block::Linear(layer), None) => linear_block(
-            hidden,
-            layer,
-            device,
-            &[],
-            &vec![0f32; V_HEADS * LIN_DIM * LIN_DIM],
-        ),
+        (Block::Linear(layer), None) => {
+            let state = Tensor::<Wgpu, 3>::zeros([V_HEADS, LIN_DIM, LIN_DIM], &hidden.device());
+            linear_block(hidden, layer, None, state)
+        }
         (Block::Full(layer), Some(Carry::Full { k, v })) => full_block(hidden, layer, cos, sin, Some((k, v))),
         (Block::Full(layer), None) => full_block(hidden, layer, cos, sin, None),
         _ => panic!("language layer cache does not match the block"),
@@ -434,171 +444,144 @@ fn step_block(
 fn linear_block(
     hidden: Tensor<Wgpu, 2>,
     layer: &LinearBlock,
-    device: &WgpuDevice,
-    history: &[f32],
-    state: &[f32],
+    history: Option<&Tensor<Wgpu, 2>>,
+    state: Tensor<Wgpu, 3>,
 ) -> (Tensor<Wgpu, 2>, Carry) {
     let seq = hidden.dims()[0];
     let normed = rms35(hidden.clone(), &layer.input_norm);
-    let mixed = cpu_f32(&linear2(&normed, &layer.qkv, None));
-    let conv = causal_conv(&mixed, history, &layer.conv, seq);
-    let z = cpu_f32(&linear2(&normed, &layer.z, None));
-    let a = cpu_f32(&linear2(&normed, &layer.a, None));
-    let b = cpu_f32(&linear2(&normed, &layer.b, None));
-    let mut q = vec![0f32; seq * V_HEADS * LIN_DIM];
-    let mut k = vec![0f32; seq * V_HEADS * LIN_DIM];
-    let mut v = vec![0f32; seq * V_HEADS * LIN_DIM];
-    for t in 0..seq {
-        let base = t * CONV_DIM;
-        l2_repeat(&conv[base..base + KEY_DIM], &mut q[t * V_HEADS * LIN_DIM..], true);
-        l2_repeat(&conv[base + KEY_DIM..base + 2 * KEY_DIM], &mut k[t * V_HEADS * LIN_DIM..], false);
-        let vsrc = &conv[base + 2 * KEY_DIM..base + CONV_DIM];
-        v[t * VALUE_DIM..(t + 1) * VALUE_DIM].copy_from_slice(vsrc);
-    }
-    let mut g = vec![0f32; seq * V_HEADS];
-    let mut beta = vec![0f32; seq * V_HEADS];
-    for t in 0..seq {
-        for head in 0..V_HEADS {
-            let raw = a[t * V_HEADS + head] + layer.dt_bias[head];
-            let softplus = if raw > 20.0 { raw } else { (1.0 + raw.exp()).ln() };
-            g[t * V_HEADS + head] = -layer.a_log[head].exp() * softplus;
-            let bb = b[t * V_HEADS + head];
-            beta[t * V_HEADS + head] = 1.0 / (1.0 + (-bb).exp());
-        }
-    }
-    let mut recurrent = state.to_vec();
-    let core = gated_delta(&q, &k, &v, &g, &beta, seq, &mut recurrent);
-    let gated = gate_norm(&core, &z, &layer.norm);
-    let core_t = Tensor::<Wgpu, 2>::from_data(TensorData::new(gated, [seq, VALUE_DIM]), device);
-    let projected = linear2(&core_t, &layer.out, None);
-    let hidden = hidden + projected;
+    let projected = linear2(&normed, &layer.in_proj, None);
+    let mixed = projected.clone().narrow(1, 0, CONV_DIM);
+    let z = projected.clone().narrow(1, CONV_DIM, VALUE_DIM);
+    let a = projected.clone().narrow(1, CONV_DIM + VALUE_DIM, V_HEADS);
+    let b = projected.narrow(1, CONV_DIM + VALUE_DIM + V_HEADS, V_HEADS);
+    let conv = causal_conv_gpu(mixed.clone(), history, &layer.conv);
+    let (q, k, v) = l2_qkv(conv);
+    let (g, beta) = decay_beta(a, b, &layer.a_log, &layer.dt_bias);
+    let (core, state) = gated_delta_gpu(q, k, v, g, beta, state);
+    let gated = gate_norm_gpu(core, z, &layer.norm);
+    let hidden = hidden + linear2(&gated, &layer.out, None);
     let normed = rms35(hidden.clone(), &layer.post_norm);
-    let keep = (CONV_K - 1).min(seq);
-    let mixed_tail = if seq >= CONV_K - 1 {
-        mixed[(seq - keep) * CONV_DIM..].to_vec()
-    } else {
-        let mut tail = history[history.len().saturating_sub((CONV_K - 1 - seq) * CONV_DIM)..].to_vec();
-        tail.extend_from_slice(&mixed);
-        tail
-    };
+    let mixed_tail = conv_tail(mixed, history, seq);
     (
         hidden + mlp(&normed, &layer.gate, &layer.up, &layer.down),
-        Carry::Linear {
-            mixed_tail,
-            state: recurrent,
-        },
+        Carry::Linear { mixed_tail, state },
     )
 }
 
-fn l2_repeat(src: &[f32], dst: &mut [f32], scale_query: bool) {
-    let scale = if scale_query { (LIN_DIM as f32).powf(-0.5) } else { 1.0 };
-    for head in 0..K_HEADS {
-        let slice = &src[head * LIN_DIM..(head + 1) * LIN_DIM];
-        let mut sum = 1e-6f32;
-        for value in slice {
-            sum += value * value;
-        }
-        let inv = sum.sqrt().recip() * scale;
-        for copy in 0..(V_HEADS / K_HEADS) {
-            let at = (head * (V_HEADS / K_HEADS) + copy) * LIN_DIM;
-            for dim in 0..LIN_DIM {
-                dst[at + dim] = slice[dim] * inv;
-            }
-        }
+fn conv_tail(mixed: Tensor<Wgpu, 2>, history: Option<&Tensor<Wgpu, 2>>, seq: usize) -> Tensor<Wgpu, 2> {
+    let keep = (CONV_K - 1).min(seq);
+    if seq >= CONV_K - 1 {
+        return mixed.narrow(0, seq - keep, keep);
     }
+    let need = CONV_K - 1 - seq;
+    let older = match history {
+        Some(history) if history.dims()[0] >= need => {
+            let rows = history.dims()[0];
+            history.clone().narrow(0, rows - need, need)
+        }
+        Some(history) => {
+            let rows = history.dims()[0];
+            let pad = Tensor::<Wgpu, 2>::zeros([need - rows, CONV_DIM], &mixed.device());
+            Tensor::cat(vec![pad, history.clone()], 0)
+        }
+        None => Tensor::<Wgpu, 2>::zeros([need, CONV_DIM], &mixed.device()),
+    };
+    Tensor::cat(vec![older, mixed], 0)
 }
 
-fn causal_conv(mixed: &[f32], history: &[f32], weight: &[f32], seq: usize) -> Vec<f32> {
-    let hist = history.len() / CONV_DIM;
-    let mut out = vec![0f32; seq * CONV_DIM];
-    for t in 0..seq {
-        for channel in 0..CONV_DIM {
-            let mut acc = 0.0f32;
-            for tap in 0..CONV_K {
-                let src = t as isize - (CONV_K as isize - 1 - tap as isize);
-                let value = if src >= 0 {
-                    mixed[src as usize * CONV_DIM + channel]
-                } else {
-                    let earlier = hist as isize + src;
-                    if earlier >= 0 {
-                        history[earlier as usize * CONV_DIM + channel]
-                    } else {
-                        0.0
-                    }
-                };
-                acc += value * weight[channel * CONV_K + tap];
+fn causal_conv_gpu(
+    mixed: Tensor<Wgpu, 2>,
+    history: Option<&Tensor<Wgpu, 2>>,
+    weight: &Tensor<Wgpu, 2>,
+) -> Tensor<Wgpu, 2> {
+    let seq = mixed.dims()[0];
+    let hist = history.map(|past| past.dims()[0]).unwrap_or(0);
+    let full = match history {
+        Some(past) if hist > 0 => Tensor::cat(vec![past.clone(), mixed], 0),
+        _ => mixed,
+    };
+    let mut acc = Tensor::<Wgpu, 2>::zeros([seq, CONV_DIM], &full.device());
+    for tap in 0..CONV_K {
+        let lag = CONV_K - 1 - tap;
+        let start = hist as isize - lag as isize;
+        let shifted = if start >= 0 {
+            full.clone().narrow(0, start as usize, seq)
+        } else {
+            let missing = (-start) as usize;
+            let zeros = Tensor::<Wgpu, 2>::zeros([missing, CONV_DIM], &full.device());
+            let take = seq.saturating_sub(missing);
+            if take == 0 {
+                zeros
+            } else {
+                Tensor::cat(vec![zeros, full.clone().narrow(0, 0, take)], 0)
             }
-            out[t * CONV_DIM + channel] = acc / (1.0 + (-acc).exp());
-        }
+        };
+        let tap_weight = weight
+            .clone()
+            .narrow(1, tap, 1)
+            .squeeze_dim::<1>(1)
+            .unsqueeze_dim::<2>(0);
+        acc = acc + shifted * tap_weight;
     }
-    out
+    acc.clone() * sigmoid(acc)
 }
 
-fn gated_delta(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    g: &[f32],
-    beta: &[f32],
-    seq: usize,
-    state: &mut [f32],
-) -> Vec<f32> {
-    let mut out = vec![0f32; seq * VALUE_DIM];
-    for t in 0..seq {
-        for head in 0..V_HEADS {
-            let decay = g[t * V_HEADS + head].exp();
-            let b = beta[t * V_HEADS + head];
-            let base = head * LIN_DIM * LIN_DIM;
-            for value in &mut state[base..base + LIN_DIM * LIN_DIM] {
-                *value *= decay;
-            }
-            let token = (t * V_HEADS + head) * LIN_DIM;
-            let mut kv = [0f32; LIN_DIM];
-            for i in 0..LIN_DIM {
-                let ks = k[token + i];
-                for j in 0..LIN_DIM {
-                    kv[j] += state[base + i * LIN_DIM + j] * ks;
-                }
-            }
-            let mut delta = [0f32; LIN_DIM];
-            for j in 0..LIN_DIM {
-                delta[j] = (v[token + j] - kv[j]) * b;
-            }
-            for i in 0..LIN_DIM {
-                let ks = k[token + i];
-                for j in 0..LIN_DIM {
-                    state[base + i * LIN_DIM + j] += ks * delta[j];
-                }
-            }
-            for i in 0..LIN_DIM {
-                let qs = q[token + i];
-                for j in 0..LIN_DIM {
-                    out[token + j] += state[base + i * LIN_DIM + j] * qs;
-                }
-            }
-        }
-    }
-    out
+fn l2_qkv(conv: Tensor<Wgpu, 2>) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 3>, Tensor<Wgpu, 3>) {
+    let seq = conv.dims()[0];
+    let q = l2_heads(conv.clone().narrow(1, 0, KEY_DIM), seq, true);
+    let k = l2_heads(conv.clone().narrow(1, KEY_DIM, KEY_DIM), seq, false);
+    let v = conv.narrow(1, 2 * KEY_DIM, VALUE_DIM).reshape([seq, V_HEADS, LIN_DIM]);
+    (q, k, v)
 }
 
-fn gate_norm(core: &[f32], z: &[f32], weight: &[f32]) -> Vec<f32> {
-    let rows = core.len() / LIN_DIM;
-    let mut out = vec![0f32; core.len()];
-    for row in 0..rows {
-        let start = row * LIN_DIM;
-        let mut var = 0.0f32;
-        for dim in 0..LIN_DIM {
-            let value = core[start + dim];
-            var += value * value;
-        }
-        let inv = (var / LIN_DIM as f32 + 1e-6).sqrt().recip();
-        for dim in 0..LIN_DIM {
-            let gate = z[start + dim];
-            let silu = gate / (1.0 + (-gate).exp());
-            out[start + dim] = core[start + dim] * inv * weight[dim] * silu;
-        }
+fn l2_heads(src: Tensor<Wgpu, 2>, seq: usize, scale_query: bool) -> Tensor<Wgpu, 3> {
+    let heads = src.reshape([seq, K_HEADS, LIN_DIM]);
+    let mut inv = (heads.clone().powf_scalar(2.0).sum_dim(2) + 1e-6).sqrt().recip();
+    if scale_query {
+        inv = inv * (LIN_DIM as f32).powf(-0.5);
     }
-    out
+    heads
+        .mul(inv)
+        .unsqueeze_dim::<4>(2)
+        .repeat_dim(2, V_HEADS / K_HEADS)
+        .reshape([seq, V_HEADS, LIN_DIM])
+}
+
+fn decay_beta(
+    a: Tensor<Wgpu, 2>,
+    b: Tensor<Wgpu, 2>,
+    a_log: &Tensor<Wgpu, 1>,
+    dt_bias: &Tensor<Wgpu, 1>,
+) -> (Tensor<Wgpu, 2>, Tensor<Wgpu, 2>) {
+    let raw = a + dt_bias.clone().unsqueeze_dim(0);
+    let softplus = (raw.clone().exp() + 1.0).log();
+    let g = raw.clone().greater_elem(20.0).float().mul(raw.clone())
+        + raw.lower_equal_elem(20.0).float().mul(softplus);
+    let g = g * a_log.clone().exp().neg().unsqueeze_dim(0);
+    let beta = sigmoid(b);
+    (g, beta)
+}
+
+fn gated_delta_gpu(
+    q: Tensor<Wgpu, 3>,
+    k: Tensor<Wgpu, 3>,
+    v: Tensor<Wgpu, 3>,
+    g: Tensor<Wgpu, 2>,
+    beta: Tensor<Wgpu, 2>,
+    state: Tensor<Wgpu, 3>,
+) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 3>) {
+    crate::delta::scan(q, k, v, g, beta, state)
+}
+
+fn gate_norm_gpu(core: Tensor<Wgpu, 3>, z: Tensor<Wgpu, 2>, weight: &Tensor<Wgpu, 1>) -> Tensor<Wgpu, 2> {
+    let seq = core.dims()[0];
+    let inv = (core.clone().powf_scalar(2.0).sum_dim(2) / (LIN_DIM as f32) + 1e-6)
+        .sqrt()
+        .recip();
+    let z = z.reshape([seq, V_HEADS, LIN_DIM]);
+    let silu_z = z.clone() * sigmoid(z);
+    let weight = weight.clone().reshape([1, 1, LIN_DIM]);
+    (core * inv * silu_z * weight).reshape([seq, VALUE_DIM])
 }
 
 fn full_block(
@@ -632,13 +615,21 @@ fn full_block(
         Some((_, past_v)) => Tensor::cat(vec![past_v.clone(), v.clone()], 1),
         None => v.clone(),
     };
-    let scores = q.clone().matmul(k_all.clone().swap_dims(1, 2)) / (TEXT_HEAD_DIM as f32).sqrt();
-    let mask = causal_mask_from(past_len, seq, &hidden.device());
-    let probs = softmax(scores + mask.unsqueeze_dim::<3>(0), 2);
-    let mixed = probs
-        .matmul(v_all.clone())
-        .swap_dims(0, 1)
-        .reshape([seq, TEXT_HEADS * TEXT_HEAD_DIM])
+    let _ = past_len;
+    let mixed = attention(
+        q.unsqueeze_dim::<4>(0),
+        k_all.clone().unsqueeze_dim::<4>(0),
+        v_all.clone().unsqueeze_dim::<4>(0),
+        None,
+        None,
+        AttentionModuleOptions {
+            is_causal: true,
+            ..AttentionModuleOptions::default()
+        },
+    )
+    .squeeze_dim::<3>(0)
+    .swap_dims(0, 1)
+    .reshape([seq, TEXT_HEADS * TEXT_HEAD_DIM])
         * gate;
     let hidden = hidden + linear2(&mixed, &layer.o, None);
     let normed = rms35(hidden.clone(), &layer.post_norm);
@@ -697,7 +688,8 @@ fn vision_attn(
     let q = rope_vision(take_heads(&qkv, seq, 0), cos, sin);
     let k = rope_vision(take_heads(&qkv, seq, 1), cos, sin);
     let v = take_heads(&qkv, seq, 2);
-    let scores = q.clone().matmul(k.swap_dims(1, 2)) / (VISION_HEAD_DIM as f32).sqrt();
+    let scale = (VISION_HEAD_DIM as f32).sqrt();
+    let scores = q.matmul(k.swap_dims(1, 2)) / scale;
     let mixed = softmax(scores, 2)
         .matmul(v)
         .swap_dims(0, 1)
@@ -754,7 +746,7 @@ fn merge(hidden: &Tensor<Wgpu, 2>, merger: &Merger, device: &WgpuDevice) -> Tens
     let groups = seq / (MERGE * MERGE);
     let wide = layer_norm(hidden.clone(), &merger.norm_w, &merger.norm_b)
         .reshape([groups, VISION_HIDDEN * MERGE * MERGE]);
-    let mid = gelu_erf(linear2(&wide, &merger.fc1_w, Some(&merger.fc1_b)), device);
+    let mid = gelu(linear2(&wide, &merger.fc1_w, Some(&merger.fc1_b)));
     linear2(&mid, &merger.fc2_w, Some(&merger.fc2_b))
 }
 
@@ -865,7 +857,14 @@ fn causal_mask_from(past: usize, seq: usize, device: &WgpuDevice) -> Tensor<Wgpu
 }
 
 fn linear2(x: &Tensor<Wgpu, 2>, weight: &Tensor<Wgpu, 2>, bias: Option<&Tensor<Wgpu, 1>>) -> Tensor<Wgpu, 2> {
-    let y = x.clone().matmul(weight.clone().transpose());
+    let y = if weight.dtype() == FloatDType::F16.into() {
+        x.clone()
+            .cast(FloatDType::F16)
+            .matmul(weight.clone().transpose())
+            .cast(FloatDType::F32)
+    } else {
+        x.clone().matmul(weight.clone().transpose())
+    };
     match bias {
         Some(bias) => y + bias.clone().unsqueeze_dim::<2>(0),
         None => y,
@@ -894,32 +893,6 @@ fn gelu_tanh(x: Tensor<Wgpu, 2>) -> Tensor<Wgpu, 2> {
     let cube = x.clone() * x.clone() * x.clone();
     let inner = (x.clone() + cube * 0.044715) * (2.0 / std::f32::consts::PI).sqrt();
     x * (inner.tanh() + 1.0) * 0.5
-}
-
-fn gelu_erf(x: Tensor<Wgpu, 2>, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
-    let dims = x.dims();
-    let data = x.into_data();
-    let values = data
-        .as_slice::<f32>()
-        .unwrap()
-        .iter()
-        .copied()
-        .map(|value| {
-            let sign = if value < 0.0 { -1.0 } else { 1.0 };
-            let a = value.abs() / std::f32::consts::SQRT_2;
-            let t = 1.0 / (1.0 + 0.3275911 * a);
-            let poly = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
-                + 0.254829592)
-                * t;
-            let erf = sign * (1.0 - poly * (-a * a).exp());
-            0.5 * value * (1.0 + erf)
-        })
-        .collect();
-    Tensor::from_data(TensorData::new(values, [dims[0], dims[1]]), device)
-}
-
-fn cpu_f32(tensor: &Tensor<Wgpu, 2>) -> Vec<f32> {
-    tensor.clone().into_data().as_slice::<f32>().unwrap().to_vec()
 }
 
 /// 32 rope pairs for `ROTARY` 64; `MROPE` sections fit inside them.

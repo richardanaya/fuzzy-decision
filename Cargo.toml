@@ -26,10 +26,15 @@ name = "vision_suite"
 name = "image_eval"
 
 [dependencies]
-burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu"] }
+burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu", "fusion"] }
+burn-cubecl = { version = "0.21.0", default-features = false, features = ["fusion"] }
+burn-fusion = { version = "0.21.0", default-features = false }
+burn-ir = { version = "0.21.0", default-features = false }
+burn-std = { version = "0.21.0", default-features = false }
+cubecl = { version = "0.10.0", default-features = false, features = ["stdlib"] }
 safetensors = "0.4"
 thiserror = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
-burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu", "ndarray"] }
+burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu", "ndarray", "fusion"] }
