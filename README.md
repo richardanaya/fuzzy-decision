@@ -1,8 +1,8 @@
 # fuzzy-decision
 
-`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text questions use Kev-4B. Image questions use `yah01/vjev-vision`. The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads weights from a directory you pass. It does not download them. The crate is MIT. The checkpoints are separate and Apache-2.0.
+`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text and image questions both use [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash). The forward pass runs on [Burn](https://burn.dev) 0.21 with the WGPU backend. This crate reads weights from a directory you pass. It does not download them. The crate is MIT. The checkpoint is separate and Apache-2.0.
 
-Text mode loads **Kev-4B** on its Qwen3 revision: `Qwen/Qwen3-4B-Base`, the LoRA from `jaredpalmer/kev-4b` at revision `qwen3` merged in at load, and that revision's pointer head. The `main` files of `jaredpalmer/kev-4b` are a Qwen3.5 hybrid and do not load. Vision mode loads `yah01/vjev-vision`: Qwen3.5-4B, its vision tower, and a listwise head that scores every option in one forward pass.
+**Clef-Flash** is Cloudflare's 9B multimodal decision model, post-trained from `Qwen/Qwen3.5-9B`. It takes a state (text, with an optional image) plus a schema of typed questions — yes/no (`noul`), `choice`, and ordered `score` — and returns logits for every option of every question in one forward pass, through a joint schema head that routes evidence from the state to each question. Text mode skips the vision tower; vision mode loads it. Both modes read the same snapshot directory.
 
 One process holds one loaded model. Later calls reuse it.
 
@@ -10,66 +10,42 @@ One process holds one loaded model. Later calls reuse it.
 
 ```toml
 [dependencies]
-fuzzy-decision = "0.4"
+fuzzy-decision = "0.5"
 ```
 
-A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The weights are stored as f32, so the 4B checkpoint needs several gigabytes of GPU memory. Loading the files and compiling shaders takes longer than it did for the 0.6B checkpoint.
+A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The checkpoint is stored as bf16 (about 19 GB on disk) and this crate runs it as f32 on the device, so plan for roughly 36 GB of GPU memory plus activations. The two token tables (embedding and `lm_head`) stay on the CPU in bf16 to halve host RAM.
 
 ## Weights
 
-Put these four files in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/kev-4b` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
+Put a local `Cloudflare/clef-flash` snapshot in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/clef-flash` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
 
-| File in that directory | Exact URL |
+| File in that directory | Purpose |
 | --- | --- |
-| `model.safetensors` | https://huggingface.co/Qwen/Qwen3-4B-Base/resolve/main/model.safetensors |
-| `adapter_model.safetensors` | https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/adapter_model.safetensors |
-| `tokenizer.json` | https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/tokenizer.json |
-| `head.safetensors` | built from https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/head.pt |
-
-`model.safetensors` is the base model, about 8 GB, from [Qwen/Qwen3-4B-Base](https://huggingface.co/Qwen/Qwen3-4B-Base). The adapter and the tokenizer come from revision `qwen3` of [jaredpalmer/kev-4b](https://huggingface.co/jaredpalmer/kev-4b). That revision publishes the pointer head as `head.pt`, a PyTorch zip. This crate reads `head.safetensors` with four float32 tensors: `q.weight` and `k.weight` shaped `[256, 2560]`, and `q.bias` and `k.bias` shaped `[256]`. The LoRA rank is 16 and `lora_alpha` is 32, so the merge scale is 2.
+| `tokenizer.json` | the tokenizer |
+| `model.safetensors.index.json` | maps tensor names to shards |
+| `model-00001-of-00004.safetensors` … `model-00004-of-00004.safetensors` | the backbone and vision tower, bf16 |
+| `joint_head.safetensors` | the joint schema head |
+| `joint_head_config.json` | head dimensions |
 
 Fetch them from the application that embeds this library, once, before the first `open`. The library never calls the network.
 
 ```bash
-DIR=models/kev-4b
+DIR=models/clef-flash
 mkdir -p "$DIR"
-curl -L --fail -o "$DIR/model.safetensors" \
-  https://huggingface.co/Qwen/Qwen3-4B-Base/resolve/main/model.safetensors
-curl -L --fail -o "$DIR/adapter_model.safetensors" \
-  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/adapter_model.safetensors
-curl -L --fail -o "$DIR/tokenizer.json" \
-  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/tokenizer.json
-curl -L --fail -o "$DIR/head.pt" \
-  https://huggingface.co/jaredpalmer/kev-4b/resolve/qwen3/head.pt
-python3 - "$DIR" << 'PY'
-import json, struct, sys, zipfile
-from pathlib import Path
-directory = Path(sys.argv[1])
-archive = zipfile.ZipFile(directory / "head.pt")
-specs = [
-    ("q.weight", "head/data/0", [256, 2560]),
-    ("q.bias", "head/data/1", [256]),
-    ("k.weight", "head/data/2", [256, 2560]),
-    ("k.bias", "head/data/3", [256]),
-]
-header, offset, blobs = {}, 0, []
-for name, member, shape in specs:
-    raw = archive.read(member)
-    header[name] = {"dtype": "F32", "shape": shape, "data_offsets": [offset, offset + len(raw)]}
-    offset += len(raw)
-    blobs.append(raw)
-meta = json.dumps(header, separators=(",", ":")).encode()
-meta += b" " * ((8 - len(meta) % 8) % 8)
-with (directory / "head.safetensors").open("wb") as out:
-    out.write(struct.pack("<Q", len(meta)))
-    out.write(meta)
-    out.writelines(blobs)
-PY
+for f in tokenizer.json model.safetensors.index.json \
+         model-00001-of-00004.safetensors model-00002-of-00004.safetensors \
+         model-00003-of-00004.safetensors model-00004-of-00004.safetensors \
+         joint_head.safetensors joint_head_config.json; do
+  curl -L --fail -o "$DIR/$f" \
+    "https://huggingface.co/Cloudflare/clef-flash/resolve/main/$f"
+done
 ```
+
+No token is required; the repository is public. If you mirror it behind authentication, pass your own token to `curl` (for example `-H "Authorization: Bearer $HF_TOKEN"`) — this crate never reads one.
 
 Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or set `LoadOptions { weights_dir: Some(path), .. }`. Do not commit the files.
 
-Only `kev-4b` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`. Weights are `f32` on the default WGPU device.
+Only `clef-flash` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`. Weights are `f32` on the default WGPU device.
 
 ## One question
 
@@ -77,7 +53,7 @@ Only `kev-4b` loads. Any other `LoadOptions.model` returns `Error::UnsupportedMo
 use fuzzy_decision::FuzzyDecision;
 
 fn main() -> Result<(), fuzzy_decision::Error> {
-    let decider = FuzzyDecision::open("models/kev-4b")?;
+    let decider = FuzzyDecision::open("models/clef-flash")?;
     let state = "I was charged twice and I want my money back.";
 
     let refund = decider.noul(state, "The customer is asking for a refund.")?;
@@ -114,12 +90,12 @@ The same state and the same options return the same answer. The library does not
 
 ## Several questions in one pass
 
-`decide` packs every question into one forward pass. Each question sees the state and itself, and does not see the other questions.
+`decide` packs every question into one forward pass. Clef-Flash scores the schema jointly: every question sees the state and the other questions, and the head reads all of them at once. Asking related questions together is the intended use; an answer can shift slightly when the surrounding questions change.
 
 ```rust
 use fuzzy_decision::{choice, noul, score, Answer, DecideOptions, FuzzyDecision};
 
-let decider = FuzzyDecision::open("models/kev-4b")?;
+let decider = FuzzyDecision::open("models/clef-flash")?;
 let state = "I was charged twice and I want my money back.";
 let answers = decider.decide(
     state,
@@ -146,7 +122,7 @@ for answer in &answers {
 }
 ```
 
-Answers come back in the same order as the questions. A description can be attached to a choice option; the model sees `name: description` while the returned label stays the name:
+Answers come back in the same order as the questions. A description can be attached to a choice option; the model sees the description in the option's JSON while the returned label stays the name:
 
 ```rust
 choice(
@@ -156,19 +132,19 @@ choice(
 )
 ```
 
-`decide_map` takes a `BTreeMap<String, Question>` and returns a `BTreeMap<String, Answer>` with the same keys. Map order is sorted by key, and that sorted order is the order the questions are packed.
+`decide_map` takes a `BTreeMap<String, Question>` and returns a `BTreeMap<String, Answer>` with the same keys. Map order is sorted by key, and that sorted order is the order the questions are packed. The keys are used as the schema's field identifiers, so the model can see them; pick short descriptive keys.
 
 ## Modes
 
-Text is the default. [`FuzzyDecision`] loads Kev-4B and scores a typed question with the pointer head. There is no image input.
+Text is the default. [`FuzzyDecision`] loads Clef-Flash without the vision tower and scores typed questions with the joint schema head. There is no image input.
 
-Vision is [`VisionDecision`]. It loads `yah01/vjev-vision` from a directory you prepare (the library does not download it): `tokenizer.json`, `vjev.json`, `head.pt`, `model.safetensors.index.json`, and the safetensor shards. The trunk is Qwen3.5-4B with its vision tower. A single linear head reads every option in one forward pass. `choice`, `noul`, and `score` return the same answer types as the text mode. Each call is still one question. A later call with the same image bytes and the same state reuses the picture encoding and the language-model state up to that state, and runs only the new question. The checkpoint is Apache-2.0.
+Vision is [`VisionDecision`]. It loads the same `Cloudflare/clef-flash` snapshot from a directory you prepare (the library does not download it) and adds the vision tower. `choice`, `noul`, and `score` return the same answer types as the text mode. Each call is still one question. A later call with the same image bytes and the same state reuses the picture encoding and the language-model state up to that state, and runs only the new question.
 
 ```rust
 use fuzzy_decision::{RgbImage, VisionDecision};
 
 fn main() -> Result<(), fuzzy_decision::Error> {
-    let decider = VisionDecision::load("models/vjev-vision")?;
+    let decider = VisionDecision::load("models/clef-flash")?;
     let image = RgbImage {
         width: 320,
         height: 320,
@@ -185,17 +161,15 @@ fn main() -> Result<(), fuzzy_decision::Error> {
 }
 ```
 
-## Domain eval
+Images are resized with the checkpoint's smart-resize rule (sides snap to multiples of 32) and capped so one picture stays near a thousand language-model tokens.
 
-`cargo run --release --example domain_eval` loads `models/kev-4b` and scores 1000 professional and everyday classification questions across 21 domains, including message intent, document topic, entailment, abstaining, team routing, expenses, urgency, sentiment, news desk, document type, industry, and others. The latest run is the report in [text_eval.html](text_eval.html): 893 of 1000 items matched the labeled answer. Running the example rewrites that file. It does not download weights.
+## Evals
 
-## Image eval
-
-`cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` load a local `yah01/vjev-vision` snapshot and score packed RGB images. The latest run is the report in [image_eval.html](image_eval.html): 36 of 36 items matched the labeled answer. The example does not download weights.
+`cargo run --release --example domain_eval` loads `models/clef-flash` and scores 1000 professional and everyday classification questions across 21 domains, then writes the report to `text_eval.html`. `cargo run --release --example vision_suite` and `cargo run --release --example vision_judge` score packed RGB images from a manifest. The examples do not download weights. Reports from the previous checkpoint were removed; rerun the examples to produce fresh ones.
 
 ## Limits
 
-The state, including its delimiter token, can be at most **8192** tokens. The state plus any one question (instructions, options, and the decide token) can also be at most **8192** tokens. Positions start again at the beginning of each question, after the shared state.
+The packed record — the state, the schema with every question, and the template tokens around them — can be at most **16384** tokens. The state portion is capped separately by `max_state_tokens` (also 16384 by default; the template and schema take tokens out of what fits).
 
 Count tokens before you call, with the same tokenizer the model uses:
 
@@ -203,9 +177,7 @@ Count tokens before you call, with the same tokenizer the model uses:
 let n = decider.count_tokens("alpha beta gamma delta");
 ```
 
-`count_tokens` counts the text. The packer also inserts one delimiter in front of the state, so a limit check is `count_tokens(state) + 1`.
-
-Choice allows 1 to 255 options. Score allows 2 to 255 levels, in order. Instructions and options must be non-empty, and option labels must be unique. An empty question list is valid and still runs the model on the state, then returns no answers.
+Choice allows 1 to 255 options. Score allows 2 to 255 levels, in order. Instructions and options must be non-empty, and option labels must be unique. An empty question list is valid and returns no answers without running the model.
 
 By default a state that is too long is cut to the limit (`Truncation::Cut`). `Truncation::Error` fails instead:
 
@@ -221,9 +193,9 @@ let answers = decider.decide(
 )?;
 ```
 
-`max_state_tokens` and `truncation` on `DecideOptions` apply to that call. The same methods on `LoadOptions` set the default for every later call. `max_length` on `LoadOptions` is the state-plus-one-question cap. Setting either cap above 8192 walks off the end of the position table.
+`max_state_tokens` and `truncation` on `DecideOptions` apply to that call. The same methods on `LoadOptions` set the default for every later call. `max_length` on `LoadOptions` is the whole-record cap. Setting either cap above 16384 is allowed by the checkpoint's rotary embedding but is untested territory.
 
-A question that still does not fit next to the state returns `Error::Row` with `state_tokens`, `question_tokens`, and `limit`. A state that does not fit in strict mode returns `Error::Truncated` with `state_tokens` and `kept`.
+A state that does not fit in strict mode returns `Error::Truncated` with `state_tokens` and `kept`.
 
 ## Temperature
 
@@ -247,8 +219,8 @@ let sharp = decider.choice_with(
 
 | Error | When |
 | --- | --- |
-| `MissingFile` | `model.safetensors`, `adapter_model.safetensors`, `head.safetensors`, or `tokenizer.json` is not in the directory |
-| `UnsupportedModel` | `model` is not `kev-4b` |
+| `MissingFile` | `tokenizer.json`, `model.safetensors.index.json`, a shard it names, `joint_head.safetensors`, or `joint_head_config.json` is not in the directory |
+| `UnsupportedModel` | `model` is not `clef-flash` |
 | `Weights` | a file is present but the tensors cannot be read |
 | `EmptyInstructions` | instructions are blank |
 | `BadOption` | an option or level is blank |
@@ -257,12 +229,21 @@ let sharp = decider.choice_with(
 | `UnknownOption` | `probability` was asked for a label that was not passed |
 | `Temperature` | temperature is not finite or is not greater than zero |
 | `Truncated` | strict truncation and the state does not fit |
-| `Row` | one question plus the state exceeds the row limit |
+| `Row` | kept for callers matching on it; Clef-Flash packs one record, so it is no longer produced |
 
 Drop the `FuzzyDecision` value when you are finished. That releases the model.
 
 ## What the model sees
 
-The packer turns the state and each question into one token sequence. Special tokens separate the state, the question, each option, and the point where the decision is read. A question attends to the state and to its own tokens. The pointer head compares the hidden state at the decision token with the hidden state at the end of each option, and the softmax is over those scores.
+The packer renders the state and the schema into one chat-template record. The state sits in a `STATE:` section; each question becomes a `FIELD` block with its instructions and one JSON line per option. The joint schema head pools the hidden states over each span, routes evidence from the state to every question, and combines a lexical prior with a learned joint score per option. The softmax is over each question's options.
 
-Text that contains a delimiter spelling such as `<|fim_prefix|>` is escaped before it is tokenized, so user text cannot close the state early.
+Text that contains a template spelling such as `<|im_start|>` is escaped before it is tokenized, so user text cannot close the state early.
+
+## Breaking changes from 0.4
+
+- The checkpoint moved from Kev-4B (`jaredpalmer/kev-4b` + `Qwen/Qwen3-4B-Base`) to `Cloudflare/clef-flash`. The constants `BASE_REPO` and `ADAPTER_REPO` were replaced by `MODEL_REPO`, and `DEFAULT_MODEL` is now `"clef-flash"`.
+- The default weights directory is `models/clef-flash` and the file set changed (see Weights above).
+- Questions in one `decide` call are scored jointly and can influence one another; in 0.4 each question was isolated by the attention mask.
+- `decide_map` keys are now visible to the model as field identifiers.
+- The token limits rose from 8192 to 16384, and the whole record shares one budget instead of a per-question row limit, so `Error::Row` is no longer produced.
+- `VisionDecision` uses the same clef-flash snapshot instead of `yah01/vjev-vision`; vision `confidence` is now the chosen option's probability and vision `noul` uses a softmax over yes/no.

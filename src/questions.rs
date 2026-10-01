@@ -92,26 +92,6 @@ pub fn question_labels(question: &Question) -> Vec<String> {
     }
 }
 
-pub fn question_option_texts(question: &Question) -> Vec<String> {
-    match question {
-        Question::Noul { .. } => NOUL_OPTIONS.iter().map(|s| (*s).to_string()).collect(),
-        Question::Score { levels, .. } => levels.clone(),
-        Question::Choice {
-            options,
-            descriptions,
-            ..
-        } => options
-            .iter()
-            .map(|option| match descriptions.get(option) {
-                Some(description) if !description.is_empty() => {
-                    format!("{option}: {description}")
-                }
-                _ => option.clone(),
-            })
-            .collect(),
-    }
-}
-
 pub fn validate_question(
     question: &Question,
     label: &str,

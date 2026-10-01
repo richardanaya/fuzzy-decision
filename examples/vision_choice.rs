@@ -5,7 +5,7 @@
 //! ```
 //!
 //! `rgb` is tightly packed RGB bytes. The snapshot is a local
-//! `Qwen/Qwen3-VL-4B-Instruct` directory. This example does not download it.
+//! `Cloudflare/clef-flash` directory. This example does not download it.
 
 use fuzzy_decision::{RgbImage, VisionDecision};
 
