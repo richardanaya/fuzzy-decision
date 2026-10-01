@@ -22,6 +22,9 @@ name = "vision_judge"
 [[example]]
 name = "vision_suite"
 
+[[example]]
+name = "image_eval"
+
 [dependencies]
 burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu"] }
 safetensors = "0.4"
