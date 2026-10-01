@@ -1,4 +1,4 @@
-//! Professional and common classification questions. One load of models/kev-4b.
+//! Professional and common classification questions. One load of models/clef-flash.
 //! Writes text_eval.html next to Cargo.toml.
 //!
 //! ```text
@@ -152,13 +152,13 @@ fn write_report(outcomes: &[Outcome]) {
 <body>
   <header>
     <p class="meta">fuzzy-decision &nbsp;·&nbsp; classification report &nbsp;·&nbsp; {date}</p>
-    <h1>How Kev-4B does on ordinary classification</h1>
+    <h1>How Clef-Flash does on ordinary classification</h1>
     <p class="figure">{total_hit} / {total_n} &nbsp; <span class="meta">{pct:.0}%</span></p>
     <p>Each item is a short workplace or everyday text, one question, and a closed set of answers. The model must pick from that set. It does not write a free-form answer.</p>
   </header>
 
   <h2>What was measured</h2>
-  <p>The checkpoint is the Kev-4B Qwen3 revision, loaded from <code>models/kev-4b</code>. {domain_count} domains, {total_n} items. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
+  <p>The checkpoint is Cloudflare's Clef-Flash, loaded from <code>models/clef-flash</code>. {domain_count} domains, {total_n} items. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
   <p>Domains: {domain_list}. Some situations are repeated with a short filing prefix so the set reaches 1000 items. The label does not change.</p>
 
   <h2>Results by domain</h2>
@@ -211,13 +211,13 @@ fn write_report(outcomes: &[Outcome]) {
 
 fn main() -> ExitCode {
     let options = LoadOptions {
-        weights_dir: Some("models/kev-4b".into()),
+        weights_dir: Some("models/clef-flash".into()),
         ..LoadOptions::default()
     };
     let info = FuzzyDecision::info(&options);
     if !info.ready {
         eprintln!(
-            "weights are not ready in {} (need model.safetensors, adapter_model.safetensors, head.safetensors, tokenizer.json)",
+            "weights are not ready in {} (need tokenizer.json, model.safetensors.index.json plus its shards, joint_head.safetensors, joint_head_config.json)",
             info.weights_dir.display()
         );
         return ExitCode::from(2);

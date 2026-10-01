@@ -1,28 +1,17 @@
-//! Qwen3 tokenizer and the Kev packing used by `jaredpalmer/kev`.
+//! Clef-Flash tokenizer: the Qwen3.5 tokenizer plus the delimiter escaping
+//! this crate applies to user text.
 
 use std::path::Path;
 
 use tokenizers::Tokenizer;
 
-use crate::qwen::Packed;
-use crate::questions::question_option_texts;
-use crate::Question;
-
-const SPECIAL: [&str; 5] = [
-    "<|fim_prefix|>",
-    "<|fim_middle|>",
-    "<|box_start|>",
-    "<|box_end|>",
-    "<|fim_suffix|>",
-];
+use crate::record::TemplateEncoder;
 
 pub struct HfTokenizer {
     inner: Tokenizer,
-    state: u32,
-    question: u32,
-    option_start: u32,
-    option_end: u32,
-    decide: u32,
+    vision_start: u32,
+    vision_end: u32,
+    image_pad: u32,
 }
 
 impl HfTokenizer {
@@ -35,11 +24,9 @@ impl HfTokenizer {
                 .ok_or_else(|| format!("tokenizer is missing {name}"))
         };
         Ok(Self {
-            state: id(SPECIAL[0])?,
-            question: id(SPECIAL[1])?,
-            option_start: id(SPECIAL[2])?,
-            option_end: id(SPECIAL[3])?,
-            decide: id(SPECIAL[4])?,
+            vision_start: id("<|vision_start|>")?,
+            vision_end: id("<|vision_end|>")?,
+            image_pad: id("<|image_pad|>")?,
             inner,
         })
     }
@@ -48,78 +35,39 @@ impl HfTokenizer {
         self.encode_user(text).len()
     }
 
-    pub fn encode_user(&self, text: &str) -> Vec<u32> {
-        let escaped = escape_delimiters(text);
+    /// Template text. Special tokens such as `<|im_start|>` stay special.
+    pub fn encode_raw(&self, text: &str) -> Vec<u32> {
         self.inner
-            .encode(escaped, false)
+            .encode(text, false)
             .map(|enc| enc.get_ids().to_vec())
             .unwrap_or_default()
     }
 
-    /// Pack state plus questions the way Kev's `encode` does.
-    /// `max_state` includes the state delimiter. `max_row` is state plus one branch.
-    pub fn pack(
-        &self,
-        state: &str,
-        questions: &[Question],
-        max_state: usize,
-        max_row: usize,
-        strict: bool,
-    ) -> Result<Packed, crate::Error> {
-        let state_tokens = self.encode_user(state);
-        if strict && state_tokens.len() + 1 > max_state {
-            return Err(crate::Error::Truncated {
-                state_tokens: state_tokens.len() + 1,
-                kept: max_state,
-            });
-        }
-        let kept_state = state_tokens.len().min(max_state.saturating_sub(1));
-        let mut ids = Vec::new();
-        let mut pos = Vec::new();
-        let mut seg = Vec::new();
-        ids.push(self.state);
-        ids.extend(state_tokens.iter().take(kept_state).copied());
-        let state_len = ids.len();
-        pos.extend(0..state_len as i32);
-        seg.resize(state_len, 0);
+    /// User text. `<|name|>` spellings are escaped so user text cannot
+    /// close the state or inject chat delimiters.
+    pub fn encode_user(&self, text: &str) -> Vec<u32> {
+        self.encode_raw(&escape_delimiters(text))
+    }
 
-        let mut readouts = Vec::with_capacity(questions.len());
-        for (index, question) in questions.iter().enumerate() {
-            let question_id = (index + 1) as i32;
-            let mut branch = vec![self.question];
-            branch.extend(self.encode_user(question.instructions()));
-            let mut ends = Vec::new();
-            for option in question_option_texts(question) {
-                branch.push(self.option_start);
-                branch.extend(self.encode_user(&option));
-                branch.push(self.option_end);
-                ends.push(branch.len() - 1);
-            }
-            branch.push(self.decide);
-            if state_len + branch.len() > max_row {
-                return Err(crate::Error::Row {
-                    state_tokens: state_len,
-                    question_tokens: branch.len(),
-                    limit: max_row,
-                });
-            }
-            let base = ids.len();
-            let start_pos = state_len as i32;
-            for (offset, id) in branch.iter().copied().enumerate() {
-                ids.push(id);
-                pos.push(start_pos + offset as i32);
-                seg.push(question_id);
-            }
-            let decide = base + branch.len() - 1;
-            readouts.push((decide, ends.into_iter().map(|end| base + end).collect()));
-        }
+    /// `<|vision_start|>`, `n` image slots, `<|vision_end|>`, and the newline
+    /// the Clef processor appends after the media block.
+    pub fn media_ids(&self, n_image: usize) -> Vec<u32> {
+        let mut ids = Vec::with_capacity(n_image + 3);
+        ids.push(self.vision_start);
+        ids.extend(std::iter::repeat(self.image_pad).take(n_image));
+        ids.push(self.vision_end);
+        ids.extend(self.encode_raw("\n"));
+        ids
+    }
+}
 
-        Ok(Packed {
-            ids: ids.into_iter().map(|id| id as i32).collect(),
-            pos,
-            seg,
-            readouts,
-        })
+impl TemplateEncoder for HfTokenizer {
+    fn raw(&self, text: &str) -> Vec<u32> {
+        self.encode_raw(text)
+    }
+
+    fn user(&self, text: &str) -> Vec<u32> {
+        self.encode_user(text)
     }
 }
 
@@ -133,7 +81,7 @@ impl TokenCounter for HfTokenizer {
     }
 }
 
-fn escape_delimiters(text: &str) -> String {
+pub fn escape_delimiters(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -175,8 +123,8 @@ mod tests {
     #[test]
     fn escapes_special_brackets() {
         assert_eq!(
-            escape_delimiters("see <|fim_prefix|> now"),
-            "see <¦fim_prefix¦> now"
+            escape_delimiters("see <|im_start|> now"),
+            "see <¦im_start¦> now"
         );
     }
 }

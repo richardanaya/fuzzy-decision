@@ -1,4 +1,4 @@
-//! Behavior and per-call timings for Kev-4B on Burn WGPU.
+//! Behavior and per-call timings for Clef-Flash on Burn WGPU.
 //! One process loads the checkpoint once. Each `decide` is timed on the wall clock,
 //! which includes packing, the GPU forward, and reading the logits back.
 
@@ -11,13 +11,18 @@ use fuzzy_decision::{
 };
 
 fn weights_dir() -> &'static Path {
-    Path::new("models/kev-4b")
+    Path::new("models/clef-flash")
 }
 
 fn ready() -> bool {
-    ["model.safetensors", "adapter_model.safetensors", "head.safetensors", "tokenizer.json"]
-        .into_iter()
-        .all(|name| weights_dir().join(name).is_file())
+    [
+        "tokenizer.json",
+        "model.safetensors.index.json",
+        "joint_head.safetensors",
+        "joint_head_config.json",
+    ]
+    .into_iter()
+    .all(|name| weights_dir().join(name).is_file())
 }
 
 struct Row {
@@ -120,7 +125,7 @@ fn words(n: usize) -> String {
 #[test]
 fn behavior_and_per_call_timings() {
     if !ready() {
-        eprintln!("skipping: models/kev-4b is not downloaded");
+        eprintln!("skipping: models/clef-flash is not downloaded");
         return;
     }
 
@@ -190,17 +195,16 @@ fn behavior_and_per_call_timings() {
         noul_of(&answers[2]);
     });
 
-    let mut alone_noul = 0.0;
-    timed(&jev, "noul alone for mask check", refund, &[noul("The customer is asking for a refund.")], DecideOptions::default(), &mut rows, |result| {
-        alone_noul = noul_of(&result.unwrap()[0]);
-    });
+    // Clef-Flash decides all questions in a record jointly, so a noul asked beside
+    // another question may legitimately differ from the same noul asked alone.
+    // We only require it to stay a well-formed, directionally sensible answer.
     timed(&jev, "noul beside another question", refund, &[
         choice("Which product area is the message about?", &areas, None),
         noul("The customer is asking for a refund."),
     ], DecideOptions::default(), &mut rows, |result| {
         let answers = result.unwrap();
         let packed = noul_of(&answers[1]);
-        assert!((packed - alone_noul).abs() < 1e-3, "block mask changed the noul: alone {alone_noul} packed {packed}");
+        assert!(packed > 0.5, "refund statement should stay more likely than not when packed, got {packed}");
     });
 
     let mut map_questions = BTreeMap::new();

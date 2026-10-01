@@ -1,34 +1,39 @@
-//! One forward pass of the Kev-4B Qwen3 revision on WGPU.
-//! Skips when `models/kev-4b` has not been downloaded.
+//! One forward pass of Clef-Flash on WGPU.
+//! Skips when `models/clef-flash` has not been downloaded.
 
 use std::path::Path;
 
-use fuzzy_decision::{choice, noul, score, Answer, DecideOptions, LoadOptions, FuzzyDecision};
+use fuzzy_decision::{choice, noul, score, Answer, DecideOptions, FuzzyDecision, LoadOptions};
 
 fn weights_dir() -> &'static Path {
-    Path::new("models/kev-4b")
+    Path::new("models/clef-flash")
 }
 
 fn ready() -> bool {
     let dir = weights_dir();
-    ["model.safetensors", "adapter_model.safetensors", "head.safetensors", "tokenizer.json"]
-        .into_iter()
-        .all(|name| dir.join(name).is_file())
+    [
+        "tokenizer.json",
+        "model.safetensors.index.json",
+        "joint_head.safetensors",
+        "joint_head_config.json",
+    ]
+    .into_iter()
+    .all(|name| dir.join(name).is_file())
 }
 
 #[test]
-fn kev_0_6b_scores_a_typed_question() {
+fn clef_flash_scores_a_typed_question() {
     if !ready() {
-        eprintln!("skipping: models/kev-4b is not downloaded");
+        eprintln!("skipping: models/clef-flash is not downloaded");
         return;
     }
-    let jev = FuzzyDecision::load(LoadOptions {
+    let clef = FuzzyDecision::load(LoadOptions {
         weights_dir: Some(weights_dir().to_path_buf()),
         ..LoadOptions::default()
     })
-    .expect("load kev-4b");
+    .expect("load clef-flash");
 
-    let answers = jev
+    let answers = clef
         .decide(
             "I was charged twice for the same order and I want my money back.",
             &[
