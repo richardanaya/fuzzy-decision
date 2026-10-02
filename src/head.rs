@@ -9,9 +9,9 @@
 use burn::tensor::activation::{gelu, softmax};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use safetensors::SafeTensors;
+use burn_store::SafetensorsStore;
 
-use crate::weights::{json_usize_fields, to_f32};
+use crate::weights::{dims, json_usize_fields, tensor_data, to_f32};
 
 const NORM_EPS: f64 = 1e-5;
 
@@ -137,7 +137,10 @@ impl<B: Backend> RoutingLayer<B> {
             .attention
             .forward(self.query_norm.forward(queries.clone()), normalized_memory);
         let queries = queries + routed;
-        let mid = gelu(self.ff1.forward(self.feedforward_norm.forward(queries.clone())));
+        let mid = gelu(
+            self.ff1
+                .forward(self.feedforward_norm.forward(queries.clone())),
+        );
         queries.clone() + self.ff2.forward(mid)
     }
 }
@@ -158,7 +161,10 @@ impl<B: Backend> DecoderLayer<B> {
     fn forward(&self, x: Tensor<B, 2>, memory: &Tensor<B, 2>) -> Tensor<B, 2> {
         let normed = self.norm1.forward(x.clone());
         let x = x + self.self_attn.forward(normed.clone(), normed);
-        let x = x.clone() + self.cross_attn.forward(self.norm2.forward(x), memory.clone());
+        let x = x.clone()
+            + self
+                .cross_attn
+                .forward(self.norm2.forward(x), memory.clone());
         let mid = gelu(self.linear1.forward(self.norm3.forward(x.clone())));
         x + self.linear2.forward(mid)
     }
@@ -188,59 +194,59 @@ pub struct JointSchemaHead<B: Backend> {
 
 impl<B: Backend> JointSchemaHead<B> {
     pub fn load(bytes: &[u8], config: HeadConfig, device: &B::Device) -> Result<Self, String> {
-        let tensors = SafeTensors::deserialize(bytes).map_err(|err| err.to_string())?;
-        let matrix = |name: &str| -> Result<Tensor<B, 2>, String> {
-            let view = tensors.tensor(name).map_err(|err| format!("{name}: {err}"))?;
-            let shape = view.shape().to_vec();
+        let mut store = SafetensorsStore::from_bytes(Some(bytes.to_vec()));
+        let matrix = |store: &mut SafetensorsStore, name: &str| -> Result<Tensor<B, 2>, String> {
+            let data = tensor_data(store, name)?;
+            let shape = dims(&data);
             if shape.len() != 2 {
                 return Err(format!("{name} has shape {shape:?}"));
             }
             Ok(Tensor::from_data(
-                TensorData::new(to_f32(&view)?, [shape[0], shape[1]]),
+                TensorData::new(to_f32(data)?, [shape[0], shape[1]]),
                 device,
             ))
         };
-        let vector = |name: &str| -> Result<Tensor<B, 1>, String> {
-            let view = tensors.tensor(name).map_err(|err| format!("{name}: {err}"))?;
-            let shape = view.shape().to_vec();
+        let vector = |store: &mut SafetensorsStore, name: &str| -> Result<Tensor<B, 1>, String> {
+            let data = tensor_data(store, name)?;
+            let shape = dims(&data);
             if shape.len() != 1 {
                 return Err(format!("{name} has shape {shape:?}"));
             }
             Ok(Tensor::from_data(
-                TensorData::new(to_f32(&view)?, [shape[0]]),
+                TensorData::new(to_f32(data)?, [shape[0]]),
                 device,
             ))
         };
-        let scalar = |name: &str| -> Result<f32, String> {
-            let view = tensors.tensor(name).map_err(|err| format!("{name}: {err}"))?;
-            to_f32(&view)?
+        let scalar = |store: &mut SafetensorsStore, name: &str| -> Result<f32, String> {
+            let data = tensor_data(store, name)?;
+            to_f32(data)?
                 .first()
                 .copied()
                 .ok_or_else(|| format!("{name} is empty"))
         };
-        let norm = |name: &str| -> Result<LayerNormP<B>, String> {
+        let norm = |store: &mut SafetensorsStore, name: &str| -> Result<LayerNormP<B>, String> {
             Ok(LayerNormP {
-                weight: vector(&format!("{name}.weight"))?,
-                bias: vector(&format!("{name}.bias"))?,
+                weight: vector(store, &format!("{name}.weight"))?,
+                bias: vector(store, &format!("{name}.bias"))?,
             })
         };
-        let projection = |name: &str| -> Result<LinearP<B>, String> {
+        let projection = |store: &mut SafetensorsStore, name: &str| -> Result<LinearP<B>, String> {
             Ok(LinearP {
-                weight: matrix(&format!("{name}.weight"))?,
+                weight: matrix(store, &format!("{name}.weight"))?,
                 bias: None,
             })
         };
-        let linear = |name: &str| -> Result<LinearP<B>, String> {
+        let linear = |store: &mut SafetensorsStore, name: &str| -> Result<LinearP<B>, String> {
             Ok(LinearP {
-                weight: matrix(&format!("{name}.weight"))?,
-                bias: Some(vector(&format!("{name}.bias"))?),
+                weight: matrix(store, &format!("{name}.weight"))?,
+                bias: Some(vector(store, &format!("{name}.bias"))?),
             })
         };
-        let attention = |name: &str| -> Result<Mha<B>, String> {
+        let attention = |store: &mut SafetensorsStore, name: &str| -> Result<Mha<B>, String> {
             Ok(Mha {
-                in_weight: matrix(&format!("{name}.in_proj_weight"))?,
-                in_bias: vector(&format!("{name}.in_proj_bias"))?,
-                out: linear(&format!("{name}.out_proj"))?,
+                in_weight: matrix(store, &format!("{name}.in_proj_weight"))?,
+                in_bias: vector(store, &format!("{name}.in_proj_bias"))?,
+                out: linear(store, &format!("{name}.out_proj"))?,
                 heads: config.heads,
                 width: config.width,
             })
@@ -250,49 +256,53 @@ impl<B: Backend> JointSchemaHead<B> {
         for index in 0..config.routing_layers {
             let prefix = format!("evidence_layers.{index}");
             evidence_layers.push(RoutingLayer {
-                query_norm: norm(&format!("{prefix}.query_norm"))?,
-                memory_norm: norm(&format!("{prefix}.memory_norm"))?,
-                attention: attention(&format!("{prefix}.attention"))?,
-                feedforward_norm: norm(&format!("{prefix}.feedforward_norm"))?,
-                ff1: linear(&format!("{prefix}.feedforward.0"))?,
-                ff2: linear(&format!("{prefix}.feedforward.3"))?,
+                query_norm: norm(&mut store, &format!("{prefix}.query_norm"))?,
+                memory_norm: norm(&mut store, &format!("{prefix}.memory_norm"))?,
+                attention: attention(&mut store, &format!("{prefix}.attention"))?,
+                feedforward_norm: norm(&mut store, &format!("{prefix}.feedforward_norm"))?,
+                ff1: linear(&mut store, &format!("{prefix}.feedforward.0"))?,
+                ff2: linear(&mut store, &format!("{prefix}.feedforward.3"))?,
             });
         }
         let mut layers = Vec::with_capacity(config.layers);
         for index in 0..config.layers {
             let prefix = format!("layers.{index}");
             layers.push(DecoderLayer {
-                self_attn: attention(&format!("{prefix}.self_attn"))?,
-                cross_attn: attention(&format!("{prefix}.multihead_attn"))?,
-                norm1: norm(&format!("{prefix}.norm1"))?,
-                norm2: norm(&format!("{prefix}.norm2"))?,
-                norm3: norm(&format!("{prefix}.norm3"))?,
-                linear1: linear(&format!("{prefix}.linear1"))?,
-                linear2: linear(&format!("{prefix}.linear2"))?,
+                self_attn: attention(&mut store, &format!("{prefix}.self_attn"))?,
+                cross_attn: attention(&mut store, &format!("{prefix}.multihead_attn"))?,
+                norm1: norm(&mut store, &format!("{prefix}.norm1"))?,
+                norm2: norm(&mut store, &format!("{prefix}.norm2"))?,
+                norm3: norm(&mut store, &format!("{prefix}.norm3"))?,
+                linear1: linear(&mut store, &format!("{prefix}.linear1"))?,
+                linear2: linear(&mut store, &format!("{prefix}.linear2"))?,
             });
         }
 
         let max_scale = 100f32.ln();
         Ok(Self {
             config,
-            hidden_norm: norm("hidden_norm")?,
-            memory_projection: projection("memory_projection")?,
-            question_projection: projection("question_projection")?,
-            option_question_projection: projection("option_question_projection")?,
-            global_projection: projection("global_projection")?,
-            option_context_projection: projection("option_context_projection")?,
-            option_lexical_projection: projection("option_lexical_projection")?,
-            type_embedding: matrix("type_embedding.weight")?,
+            hidden_norm: norm(&mut store, "hidden_norm")?,
+            memory_projection: projection(&mut store, "memory_projection")?,
+            question_projection: projection(&mut store, "question_projection")?,
+            option_question_projection: projection(&mut store, "option_question_projection")?,
+            global_projection: projection(&mut store, "global_projection")?,
+            option_context_projection: projection(&mut store, "option_context_projection")?,
+            option_lexical_projection: projection(&mut store, "option_lexical_projection")?,
+            type_embedding: matrix(&mut store, "type_embedding.weight")?,
             evidence_layers,
-            option_summary_norm: norm("option_summary_norm")?,
+            option_summary_norm: norm(&mut store, "option_summary_norm")?,
             layers,
-            field_norm: norm("field_norm")?,
-            option_norm: norm("option_norm")?,
-            scorer1: linear("residual_scorer.0")?,
-            scorer2: linear("residual_scorer.3")?,
-            prior_scale: scalar("prior_logit_scale")?.min(max_scale).exp(),
-            joint_scale: scalar("joint_logit_scale")?.min(max_scale).exp(),
-            residual_gate: sigmoid_f32(scalar("residual_gate")?),
+            field_norm: norm(&mut store, "field_norm")?,
+            option_norm: norm(&mut store, "option_norm")?,
+            scorer1: linear(&mut store, "residual_scorer.0")?,
+            scorer2: linear(&mut store, "residual_scorer.3")?,
+            prior_scale: scalar(&mut store, "prior_logit_scale")?
+                .min(max_scale)
+                .exp(),
+            joint_scale: scalar(&mut store, "joint_logit_scale")?
+                .min(max_scale)
+                .exp(),
+            residual_gate: sigmoid_f32(scalar(&mut store, "residual_gate")?),
         })
     }
 
@@ -351,13 +361,19 @@ impl<B: Backend> JointSchemaHead<B> {
         let mut option_counts = Vec::with_capacity(questions.len());
         for (index, question) in questions.iter().enumerate() {
             let contexts = Tensor::cat(
-                question.option_spans.iter().map(|span| span_mean(*span)).collect(),
+                question
+                    .option_spans
+                    .iter()
+                    .map(|span| span_mean(*span))
+                    .collect(),
                 0,
             );
             let question_vector = question_vectors.clone().narrow(0, index, 1);
             option_queries.push(
                 self.option_context_projection.forward(contexts)
-                    + self.option_lexical_projection.forward(lexical[index].clone())
+                    + self
+                        .option_lexical_projection
+                        .forward(lexical[index].clone())
                     + self.option_question_projection.forward(question_vector),
             );
             option_counts.push(question.option_spans.len());
@@ -386,10 +402,8 @@ impl<B: Backend> JointSchemaHead<B> {
             .iter()
             .map(|question| question.question_type as i32)
             .collect();
-        let type_ids = Tensor::<B, 1, Int>::from_data(
-            TensorData::new(type_ids, [questions.len()]),
-            &device,
-        );
+        let type_ids =
+            Tensor::<B, 1, Int>::from_data(TensorData::new(type_ids, [questions.len()]), &device);
         let mut fields = base_fields
             + self.option_summary_norm.forward(Tensor::cat(summaries, 0))
             + self.global_projection.forward(global_vector.clone())
