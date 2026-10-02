@@ -12,13 +12,13 @@
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::NdArray;
 use burn::tensor::{Tensor, TensorData};
-use burn_store::{ModuleStore, SafetensorsStore};
+use safetensors::SafeTensors;
 
 use crate::head::{HeadConfig, HeadQuestion, JointSchemaHead};
 use crate::questions::{choice, noul, score, Question};
 use crate::record::encode_record;
 use crate::tokenize::HfTokenizer;
-use crate::weights::{dims, tensor_data, to_f32};
+use crate::weights::to_f32;
 
 type B = NdArray<f32>;
 
@@ -28,22 +28,9 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-fn open_fixture(name: &str) -> SafetensorsStore {
-    let bytes = std::fs::read(fixture_path(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
-    SafetensorsStore::from_bytes(Some(bytes))
-}
-
-fn values(store: &mut SafetensorsStore, name: &str) -> (Vec<f32>, Vec<usize>) {
-    let data = tensor_data(store, name).unwrap_or_else(|err| panic!("{name}: {err}"));
-    let shape = dims(&data);
-    (to_f32(data).expect("fixture dtype"), shape)
-}
-
-fn has_tensor(store: &mut SafetensorsStore, name: &str) -> bool {
-    store
-        .get_snapshot(name)
-        .unwrap_or_else(|err| panic!("{name}: {err}"))
-        .is_some()
+fn values(tensors: &SafeTensors<'_>, name: &str) -> (Vec<f32>, Vec<usize>) {
+    let view = tensors.tensor(name).unwrap_or_else(|err| panic!("{name}: {err}"));
+    (to_f32(&view).expect("fixture dtype"), view.shape().to_vec())
 }
 
 fn span_of(values: &[f32]) -> (usize, usize) {
@@ -53,8 +40,8 @@ fn span_of(values: &[f32]) -> (usize, usize) {
 #[test]
 fn head_matches_the_reference_forward() {
     let bytes = std::fs::read(fixture_path("head_fixture.safetensors")).expect("head fixture");
-    let mut tensors = SafetensorsStore::from_bytes(Some(bytes.clone()));
-    let (config_values, _) = values(&mut tensors, "fixture.config");
+    let tensors = SafeTensors::deserialize(&bytes).expect("fixture file");
+    let (config_values, _) = values(&tensors, "fixture.config");
     let config = HeadConfig {
         hidden_size: config_values[0] as usize,
         width: config_values[1] as usize,
@@ -66,15 +53,15 @@ fn head_matches_the_reference_forward() {
     let device = NdArrayDevice::default();
     let head = JointSchemaHead::<B>::load(&bytes, config, &device).expect("load head");
 
-    let (hidden_values, hidden_shape) = values(&mut tensors, "fixture.hidden");
+    let (hidden_values, hidden_shape) = values(&tensors, "fixture.hidden");
     let seq = hidden_shape[0];
     let hidden = Tensor::<B, 2>::from_data(
         TensorData::new(hidden_values, [seq, config.hidden_size]),
         &device,
     );
-    let (id_values, _) = values(&mut tensors, "fixture.input_ids");
+    let (id_values, _) = values(&tensors, "fixture.input_ids");
     let input_ids: Vec<u32> = id_values.iter().map(|id| *id as u32).collect();
-    let (embedding, embedding_shape) = values(&mut tensors, "fixture.embedding");
+    let (embedding, embedding_shape) = values(&tensors, "fixture.embedding");
     assert_eq!(embedding_shape[1], config.hidden_size);
 
     let mut questions = Vec::new();
@@ -82,11 +69,11 @@ fn head_matches_the_reference_forward() {
     let mut expected = Vec::new();
     for index in 0.. {
         let name = format!("fixture.question.{index}");
-        if !has_tensor(&mut tensors, &name) {
+        if tensors.tensor(&name).is_err() {
             break;
         }
-        let (meta, _) = values(&mut tensors, &name);
-        let (spans, spans_shape) = values(&mut tensors, &format!("fixture.option_spans.{index}"));
+        let (meta, _) = values(&tensors, &name);
+        let (spans, spans_shape) = values(&tensors, &format!("fixture.option_spans.{index}"));
         let option_spans: Vec<(usize, usize)> = (0..spans_shape[0])
             .map(|row| span_of(&spans[row * 2..row * 2 + 2]))
             .collect();
@@ -113,7 +100,7 @@ fn head_matches_the_reference_forward() {
             question_span: span_of(&meta[1..3]),
             option_spans,
         });
-        let (logits, _) = values(&mut tensors, &format!("fixture.logits.{index}"));
+        let (logits, _) = values(&tensors, &format!("fixture.logits.{index}"));
         expected.push(logits);
     }
     assert_eq!(questions.len(), 3, "the fixture has three questions");
@@ -137,7 +124,8 @@ fn head_matches_the_reference_forward() {
 fn encoding_matches_the_reference_layout() {
     let tokenizer =
         HfTokenizer::open(&fixture_path("small_tokenizer.json")).expect("small tokenizer");
-    let mut tensors = open_fixture("encoding_fixture.safetensors");
+    let bytes = std::fs::read(fixture_path("encoding_fixture.safetensors")).expect("encoding fixture");
+    let tensors = SafeTensors::deserialize(&bytes).expect("fixture file");
 
     let records: Vec<(&str, Vec<Question>, Vec<String>)> = vec![
         (
@@ -164,31 +152,35 @@ fn encoding_matches_the_reference_layout() {
     ];
 
     for (record_index, (state, questions, ids)) in records.iter().enumerate() {
-        let layout = encode_record(&tokenizer, state, None, questions, ids, 16384, 16384, false)
-            .expect("encode");
+        let layout = encode_record(
+            &tokenizer,
+            state,
+            None,
+            questions,
+            ids,
+            16384,
+            16384,
+            false,
+        )
+        .expect("encode");
         let prefix = format!("record{record_index}");
-        let (want_ids, _) = values(&mut tensors, &format!("{prefix}.input_ids"));
+        let (want_ids, _) = values(&tensors, &format!("{prefix}.input_ids"));
         let got_ids: Vec<f32> = layout.ids.iter().map(|id| *id as f32).collect();
         assert_eq!(got_ids, want_ids, "{prefix} token ids");
         for (question_index, question) in layout.questions.iter().enumerate() {
-            let (meta, _) = values(&mut tensors, &format!("{prefix}.q{question_index}.meta"));
+            let (meta, _) = values(&tensors, &format!("{prefix}.q{question_index}.meta"));
             assert_eq!(question.question_type, meta[0] as usize, "{prefix} type");
             assert_eq!(
                 question.question_span,
                 span_of(&meta[1..3]),
                 "{prefix} q{question_index} span"
             );
-            let (spans, spans_shape) = values(
-                &mut tensors,
-                &format!("{prefix}.q{question_index}.option_spans"),
-            );
+            let (spans, spans_shape) =
+                values(&tensors, &format!("{prefix}.q{question_index}.option_spans"));
             let want: Vec<(usize, usize)> = (0..spans_shape[0])
                 .map(|row| span_of(&spans[row * 2..row * 2 + 2]))
                 .collect();
-            assert_eq!(
-                question.option_spans, want,
-                "{prefix} q{question_index} options"
-            );
+            assert_eq!(question.option_spans, want, "{prefix} q{question_index} options");
         }
     }
 }

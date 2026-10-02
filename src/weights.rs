@@ -1,41 +1,31 @@
 //! Reading the Clef-Flash snapshot: sharded safetensors, the joint head file,
 //! and the small JSON head config.
-//!
-//! Tensor bytes come from burn-store's [`SafetensorsStore`]. This crate does
-//! not call the `safetensors` crate itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use burn::tensor::{bf16, DType, TensorData};
-use burn_store::{ModuleStore, SafetensorsStore};
+use safetensors::tensor::TensorView;
+use safetensors::SafeTensors;
 
 pub fn default_weights_dir() -> PathBuf {
     PathBuf::from("models/clef-flash")
 }
 
-/// Materializes one tensor from a burn-store safetensors reader.
-pub fn tensor_data(store: &mut SafetensorsStore, name: &str) -> Result<TensorData, String> {
-    let snapshot = match store.get_snapshot(name) {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => return Err(format!("missing tensor {name}")),
-        Err(err) => return Err(format!("{name}: {err}")),
-    };
-    snapshot.to_data().map_err(|err| format!("{name}: {err}"))
-}
-
-pub fn dims(data: &TensorData) -> Vec<usize> {
-    data.shape.iter().copied().collect()
-}
-
-/// f32 values of an f32, bf16, or f16 tensor. Conversion goes through burn's
-/// element types, which match the usual half-precision bit casts.
-pub fn to_f32(data: TensorData) -> Result<Vec<f32>, String> {
-    match data.dtype {
-        DType::F32 | DType::BF16 | DType::F16 => data
-            .convert::<f32>()
-            .to_vec()
-            .map_err(|err| err.to_string()),
+pub fn to_f32(view: &TensorView<'_>) -> Result<Vec<f32>, String> {
+    let bytes = view.data();
+    match view.dtype() {
+        safetensors::Dtype::F32 => Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()),
+        safetensors::Dtype::BF16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+            .collect()),
+        safetensors::Dtype::F16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| half_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+            .collect()),
         other => Err(format!("unsupported dtype {other:?}")),
     }
 }
@@ -49,31 +39,28 @@ pub struct Bf16Table {
 }
 
 impl Bf16Table {
-    pub fn from_data(data: TensorData) -> Result<Self, String> {
-        let shape = dims(&data);
+    pub fn from_view(view: &TensorView<'_>) -> Result<Self, String> {
+        let shape = view.shape().to_vec();
         if shape.len() != 2 {
             return Err(format!("token table has shape {shape:?}"));
         }
-        // Keep the top 16 bits. Native bf16 is already those bits; f32 is
-        // truncated the same way (not rounded) so a float32 table matches the
-        // previous loader.
-        let values: Vec<u16> = match data.dtype {
-            DType::BF16 => data
-                .as_slice::<bf16>()
-                .map_err(|err| err.to_string())?
-                .iter()
-                .map(|value| value.to_bits())
+        let bytes = view.data();
+        let data: Vec<u16> = match view.dtype() {
+            safetensors::Dtype::BF16 => bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                 .collect(),
-            DType::F32 => data
-                .as_slice::<f32>()
-                .map_err(|err| err.to_string())?
-                .iter()
-                .map(|value| (value.to_bits() >> 16) as u16)
+            safetensors::Dtype::F32 => bytes
+                .chunks_exact(4)
+                .map(|chunk| {
+                    let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    (value.to_bits() >> 16) as u16
+                })
                 .collect(),
             other => return Err(format!("unsupported table dtype {other:?}")),
         };
         Ok(Self {
-            data: values,
+            data,
             rows: shape[0],
             dim: shape[1],
         })
@@ -107,18 +94,37 @@ pub fn bf16_to_f32(half: u16) -> f32 {
     f32::from_bits((half as u32) << 16)
 }
 
-/// Reads tensors across the sharded `model-*.safetensors` files. Each shard is
-/// a burn-store [`SafetensorsStore`] (memory-mapped) and is dropped once every
-/// tensor this loader asked for has been read.
-pub struct Store {
-    files: HashMap<String, Shard>,
-    map: HashMap<String, String>,
-    left: HashMap<String, usize>,
+fn half_to_f32(half: u16) -> f32 {
+    let sign = ((half >> 15) & 1) as u32;
+    let exp = ((half >> 10) & 0x1f) as u32;
+    let frac = (half & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if frac == 0 {
+            sign << 31
+        } else {
+            let mut mantissa = frac;
+            let mut exponent = 127 - 15 + 1;
+            while mantissa & 0x400 == 0 {
+                mantissa <<= 1;
+                exponent -= 1;
+            }
+            mantissa &= 0x3ff;
+            (sign << 31) | (exponent << 23) | (mantissa << 13)
+        }
+    } else if exp == 31 {
+        (sign << 31) | (0xff << 23) | (frac << 13)
+    } else {
+        (sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13)
+    };
+    f32::from_bits(bits)
 }
 
-struct Shard {
-    path: PathBuf,
-    store: Option<SafetensorsStore>,
+/// Reads tensors across the sharded `model-*.safetensors` files, keeping each
+/// shard's bytes only while tensors remain to be read from it.
+pub struct Store {
+    files: HashMap<String, (PathBuf, Option<Vec<u8>>)>,
+    map: HashMap<String, String>,
+    left: HashMap<String, usize>,
 }
 
 impl Store {
@@ -145,15 +151,7 @@ impl Store {
             files: map
                 .values()
                 .cloned()
-                .map(|file| {
-                    (
-                        file.clone(),
-                        Shard {
-                            path: dir.join(file),
-                            store: None,
-                        },
-                    )
-                })
+                .map(|file| (file, (dir.to_path_buf(), None)))
                 .collect(),
             map,
             left,
@@ -174,56 +172,50 @@ impl Store {
             let remaining = self.left.get_mut(&file).expect("shard count");
             *remaining -= 1;
             if *remaining == 0 {
-                self.files.get_mut(&file).expect("shard").store = None;
+                self.files.get_mut(&file).expect("shard").1 = None;
             }
         }
     }
 
     pub fn read(&mut self, name: &str) -> Result<(Vec<f32>, Vec<usize>), String> {
-        self.with_data(name, |data| {
-            let shape = dims(&data);
-            let values = to_f32(data)?;
+        self.with_view(name, |view| {
+            let shape = view.shape().to_vec();
+            let values = to_f32(view)?;
             Ok((values, shape))
         })
     }
 
     pub fn table(&mut self, name: &str) -> Result<Bf16Table, String> {
-        self.with_data(name, Bf16Table::from_data)
+        self.with_view(name, Bf16Table::from_view)
     }
 
-    fn with_data<T>(
+    fn with_view<T>(
         &mut self,
         name: &str,
-        convert: impl FnOnce(TensorData) -> Result<T, String>,
+        convert: impl FnOnce(&TensorView<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
         let file = self
             .map
             .get(name)
             .cloned()
             .ok_or_else(|| format!("missing tensor {name}"))?;
-        let data = {
-            let shard = self
-                .files
-                .get_mut(&file)
-                .ok_or_else(|| format!("missing shard {file}"))?;
-            if shard.store.is_none() {
-                if !shard.path.is_file() {
-                    return Err(format!(
-                        "read {}: No such file or directory (os error 2)",
-                        shard.path.display()
-                    ));
-                }
-                let path = shard.path.clone();
-                shard.store = Some(SafetensorsStore::from_file(path));
-            }
-            let store = shard.store.as_mut().expect("shard store");
-            tensor_data(store, name)?
-        };
-        let result = convert(data)?;
+        let slot = self
+            .files
+            .get_mut(&file)
+            .ok_or_else(|| format!("missing shard {file}"))?;
+        if slot.1.is_none() {
+            let path = slot.0.join(&file);
+            let bytes = std::fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+            slot.1 = Some(bytes);
+        }
+        let bytes = slot.1.as_ref().unwrap();
+        let tensors = SafeTensors::deserialize(bytes).map_err(|err| err.to_string())?;
+        let view = tensors.tensor(name).map_err(|err| format!("{name}: {err}"))?;
+        let result = convert(&view)?;
         let remaining = self.left.get_mut(&file).expect("shard count");
         *remaining -= 1;
         if *remaining == 0 {
-            self.files.get_mut(&file).expect("shard").store = None;
+            self.files.get_mut(&file).expect("shard").1 = None;
         }
         Ok(result)
     }
@@ -232,11 +224,7 @@ impl Store {
 /// Reads the flat integer fields of `joint_head_config.json`.
 pub fn json_usize_fields(text: &str) -> HashMap<String, usize> {
     let mut out = HashMap::new();
-    for part in text
-        .trim()
-        .trim_matches(|c| c == '{' || c == '}')
-        .split(',')
-    {
+    for part in text.trim().trim_matches(|c| c == '{' || c == '}').split(',') {
         if let Some((key, value)) = part.split_once(':') {
             let key = key.trim().trim_matches('"').to_string();
             if let Ok(value) = value.trim().parse::<usize>() {
