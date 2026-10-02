@@ -31,8 +31,8 @@ burn-cubecl = { version = "0.21.0", default-features = false, features = ["fusio
 burn-fusion = { version = "0.21.0", default-features = false }
 burn-ir = { version = "0.21.0", default-features = false }
 burn-std = { version = "0.21.0", default-features = false }
+burn-store = { version = "0.21.0", default-features = false, features = ["std", "safetensors"] }
 cubecl = { version = "0.10.0", default-features = false, features = ["stdlib"] }
-safetensors = "0.4"
 thiserror = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
