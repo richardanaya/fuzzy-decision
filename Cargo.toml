@@ -1,6 +1,6 @@
 [package]
 name = "fuzzy-decision"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Typed decisions (choice, score, noul) scored by Liquid AI's d1-omni-600M on Burn's WGPU backend, with text, audio, and image inputs."
 authors = ["Richard Anaya"]

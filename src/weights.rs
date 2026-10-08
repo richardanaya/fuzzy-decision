@@ -1,12 +1,15 @@
-//! One mmap'd `model.safetensors` plus `config.json` for d1-omni-600M.
+//! One memory-mapped `model.safetensors` plus `config.json` for d1-omni-600M.
+//!
+//! The header is parsed once. Each tensor is copied out of the map when a
+//! layer asks for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 use safetensors::tensor::TensorView;
-use safetensors::SafeTensors;
+use safetensors::{Dtype, SafeTensors};
 use serde_json::Value;
 
 pub const REQUIRED_FILES: [&str; 3] = ["tokenizer.json", "config.json", "model.safetensors"];
@@ -19,38 +22,71 @@ pub fn weights_ready(dir: &Path) -> bool {
     REQUIRED_FILES.iter().all(|name| dir.join(name).is_file())
 }
 
-pub fn to_f32(view: &TensorView<'_>) -> Result<Vec<f32>, String> {
+pub trait TensorSource {
+    fn tensor(&self, name: &str) -> Result<(Vec<f32>, Vec<usize>), String>;
+}
+
+struct Located {
+    dtype: Dtype,
+    shape: Vec<usize>,
+    offset: usize,
+    len: usize,
+}
+
+pub struct Snapshot {
+    _file: File,
+    map: Mmap,
+    tensors: HashMap<String, Located>,
+}
+
+impl Snapshot {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let file = File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
+        let map = unsafe { Mmap::map(&file) }
+            .map_err(|err| format!("mmap {}: {err}", path.display()))?;
+        let parsed = SafeTensors::deserialize(&map)
+            .map_err(|err| format!("safetensors {}: {err}", path.display()))?;
+        let base = map.as_ptr() as usize;
+        let mut tensors = HashMap::with_capacity(parsed.len());
+        for (name, view) in parsed.tensors() {
+            let data = view.data();
+            tensors.insert(
+                name,
+                Located {
+                    dtype: view.dtype(),
+                    shape: view.shape().to_vec(),
+                    offset: data.as_ptr() as usize - base,
+                    len: data.len(),
+                },
+            );
+        }
+        Ok(Self {
+            _file: file,
+            map,
+            tensors,
+        })
+    }
+}
+
+fn to_f32(view: &TensorView<'_>) -> Result<Vec<f32>, String> {
     let bytes = view.data();
     match view.dtype() {
-        safetensors::Dtype::F32 => Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .copied()
-            .map(f32::from_le_bytes)
+        Dtype::F32 => Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect()),
-        safetensors::Dtype::BF16 => Ok(bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .copied()
-            .map(u16::from_le_bytes)
-            .map(bf16_to_f32)
+        Dtype::BF16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+            .map(|half| f32::from_bits((half as u32) << 16))
             .collect()),
-        safetensors::Dtype::F16 => Ok(bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .copied()
-            .map(u16::from_le_bytes)
+        Dtype::F16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
             .map(half_to_f32)
             .collect()),
         other => Err(format!("unsupported dtype {other:?}")),
     }
-}
-
-fn bf16_to_f32(half: u16) -> f32 {
-    f32::from_bits((half as u32) << 16)
 }
 
 fn half_to_f32(half: u16) -> f32 {
@@ -78,36 +114,21 @@ fn half_to_f32(half: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-pub trait TensorSource {
-    fn tensor(&self, name: &str) -> Result<(Vec<f32>, Vec<usize>), String>;
-}
-
-pub struct Snapshot {
-    _file: File,
-    map: Mmap,
-}
-
-impl Snapshot {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let file = File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
-        // The file stays open for the life of the map.
-        let map =
-            unsafe { Mmap::map(&file) }.map_err(|err| format!("mmap {}: {err}", path.display()))?;
-        SafeTensors::deserialize(&map)
-            .map_err(|err| format!("safetensors {}: {err}", path.display()))?;
-        Ok(Self { _file: file, map })
-    }
-}
-
 impl TensorSource for Snapshot {
     fn tensor(&self, name: &str) -> Result<(Vec<f32>, Vec<usize>), String> {
-        let tensors = SafeTensors::deserialize(&self.map).map_err(|err| err.to_string())?;
-        let view = tensors
-            .tensor(name)
+        let located = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| format!("{name}: missing tensor"))?;
+        let end = located.offset + located.len;
+        let bytes = self
+            .map
+            .get(located.offset..end)
+            .ok_or_else(|| format!("{name}: bytes are outside the file"))?;
+        let view = TensorView::new(located.dtype, located.shape.clone(), bytes)
             .map_err(|err| format!("{name}: {err}"))?;
-        let shape = view.shape().to_vec();
         let values = to_f32(&view)?;
-        Ok((values, shape))
+        Ok((values, located.shape.clone()))
     }
 }
 

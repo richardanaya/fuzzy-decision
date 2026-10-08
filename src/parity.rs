@@ -2,7 +2,6 @@
 //! `encoder.py`, `vision.py`) with tiny or random weights.
 
 use burn::tensor::Device;
-use safetensors::SafeTensors;
 
 use crate::conformer::AudioTower;
 use crate::head::DecisionHead;
@@ -11,7 +10,7 @@ use crate::nn::{tensor2, to_vec};
 use crate::resample::resize_hwc;
 use crate::trunk::Trunk;
 use crate::vision::VisionTower;
-use crate::weights::{to_f32, AudioSpec, LayerKind, Snapshot, TensorSource, TrunkSpec, VisionSpec};
+use crate::weights::{AudioSpec, LayerKind, Snapshot, TensorSource, TrunkSpec, VisionSpec};
 
 
 fn fixture(name: &str) -> Snapshot {
@@ -159,12 +158,11 @@ fn vision_tower_matches_the_reference() {
 
 #[test]
 fn safetensors_helper_reads_f32() {
-    let bytes = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let source = Snapshot::open(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/resize_fixture.safetensors"),
     )
     .unwrap();
-    let tensors = SafeTensors::deserialize(&bytes).unwrap();
-    let view = tensors.tensor("fixture.output").unwrap();
-    assert!(!to_f32(&view).unwrap().is_empty());
+    let (values, _) = source.tensor("fixture.output").unwrap();
+    assert!(!values.is_empty());
 }

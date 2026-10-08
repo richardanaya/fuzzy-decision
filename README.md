@@ -12,7 +12,7 @@ One process holds one loaded model. Later calls reuse it.
 
 ```toml
 [dependencies]
-fuzzy-decision = "0.6"
+fuzzy-decision = "0.7"
 ```
 
 A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The checkpoint is one f32 `model.safetensors` of about 2.35 GB. The token embedding table (about 256 MB) stays on the CPU. The encoder plus the audio tower is about 1.8 GB of weights on the device, plus activations. `VisionDecision` loads the encoder and the SigLIP2 vision tower instead of the audio tower.
