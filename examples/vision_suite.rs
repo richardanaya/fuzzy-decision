@@ -15,7 +15,8 @@ fn main() -> Result<(), fuzzy_decision::Error> {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("snapshot directory");
     let manifest = args.next().expect("manifest");
-    let text = std::fs::read_to_string(&manifest).unwrap_or_else(|err| panic!("read {manifest}: {err}"));
+    let text =
+        std::fs::read_to_string(&manifest).unwrap_or_else(|err| panic!("read {manifest}: {err}"));
     let mut rows = Vec::new();
     let mut labels = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {

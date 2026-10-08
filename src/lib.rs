@@ -1,74 +1,89 @@
-//! Typed decisions scored by Clef-Flash on Burn's WGPU backend.
+//! Typed decisions scored by Liquid AI's d1-omni-600M on Burn's WGPU backend.
 //!
-//! Text mode takes one piece of text (the state) and any number of typed
-//! questions. One forward pass returns a probability distribution per question.
-//! Nothing is generated: an answer is always one of the options you provided.
-//! Vision mode takes an image plus text and scores it with the same checkpoint.
+//! Text mode takes one piece of text and any number of typed questions. Audio
+//! mode prepends a clip. Vision mode prepends an image. One forward pass per
+//! question returns a probability distribution. Nothing is generated: an
+//! answer is always one of the options you provided.
 //!
-//! `clef-flash` is `Cloudflare/clef-flash`: a Qwen3.5-9B backbone with its
-//! vision encoder and the Clef joint schema head, which routes evidence from
-//! the state to every question and scores all options jointly in one pass.
-//! The forward pass is Burn on the WGPU device. Weights are read from
-//! `models/clef-flash` (or `LoadOptions::weights_dir`). The library does not
-//! download them.
+//! The checkpoint is `LiquidAI/d1-omni-600M`. Weights are read from
+//! `models/d1-omni-600M` (or `LoadOptions::weights_dir`). The library does not
+//! download them. Questions are scored independently. Text questions use the
+//! per-type temperatures in `config.json`; image and audio questions stay at
+//! temperature 1 unless you set one.
 
 #![recursion_limit = "256"]
 
 mod answers;
-mod backbone;
-mod delta;
-mod clef;
+mod conformer;
+#[cfg(feature = "cpu")]
+mod cpu;
 mod head;
+mod mel;
+mod model;
+mod nn;
 #[cfg(test)]
 mod parity;
+mod prompt;
 mod questions;
-mod record;
+mod resample;
 mod tokenize;
+mod trunk;
 mod vision;
+mod wav;
 mod weights;
 
 pub use answers::{Answer, ChoiceAnswer, NoulAnswer, ScoreAnswer};
+#[cfg(feature = "cpu")]
+pub use cpu::CpuDecision;
 pub use questions::{choice, noul, score, Question, Truncation};
-pub use vision::{RgbImage, VisionDecision};
+pub use vision::{RgbImage, TILE};
+pub use wav::AudioClip;
 
 /// Which input a decision uses.
 ///
-/// [`Mode::Text`] is [`FuzzyDecision`]: the state is text only.
-/// [`Mode::Vision`] is [`VisionDecision`]: an image plus text. Both run
-/// Clef-Flash and return the same answer types.
+/// [`Mode::Text`] and [`Mode::Audio`] are [`FuzzyDecision`]. [`Mode::Vision`]
+/// is [`VisionDecision`]. A request carries an image or a clip, not both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Text,
     Vision,
+    Audio,
 }
+
 pub use tokenize::TokenCounter;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use answers::decode_answer;
-use clef::Clef;
+use burn::tensor::Tensor;
+use model::{ready, Session, Which};
+use prompt::{encode, kind_name, Modality};
 use questions::{validate_question, QuestionLimits};
-use record::encode_record;
+use vision::image_stamp;
+
+use burn::backend::wgpu::Wgpu;
 
 /// The only checkpoint [`FuzzyDecision::load`] accepts.
-pub const DEFAULT_MODEL: &str = "clef-flash";
+pub const DEFAULT_MODEL: &str = "d1-omni-600M";
 
-/// The Hugging Face repository with every weight file. License: Apache-2.0.
-pub const MODEL_REPO: &str = "Cloudflare/clef-flash";
+/// The Hugging Face repository. The weights use the LFM Open License v1.0,
+/// which limits commercial use to entities under $10M annual revenue.
+pub const MODEL_REPO: &str = "LiquidAI/d1-omni-600M";
 
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
     /// Must be [`DEFAULT_MODEL`]. Any other name returns [`Error::UnsupportedModel`].
     pub model: String,
     pub max_length: Option<usize>,
+    /// Replaces the checkpoint's text temperatures. Image and audio decisions
+    /// also use this value when it is set.
     pub temperature: Option<f32>,
     pub max_state_tokens: Option<usize>,
     pub truncation: Truncation,
-    /// Directory with a local `Cloudflare/clef-flash` snapshot: `tokenizer.json`,
-    /// `model.safetensors.index.json` and the shards it names,
-    /// `joint_head.safetensors`, and `joint_head_config.json`.
-    /// Defaults to `models/clef-flash`.
+    /// Directory with `tokenizer.json`, `config.json`, and `model.safetensors`.
+    /// Defaults to `models/d1-omni-600M`.
     pub weights_dir: Option<PathBuf>,
 }
 
@@ -86,7 +101,7 @@ impl Default for LoadOptions {
 }
 
 impl LoadOptions {
-    /// Load `clef-flash` from `dir`, which holds the snapshot files.
+    /// Load `d1-omni-600M` from `dir`.
     pub fn dir(dir: impl Into<PathBuf>) -> Self {
         Self {
             weights_dir: Some(dir.into()),
@@ -115,21 +130,11 @@ impl LoadOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DecideOptions {
     pub temperature: Option<f32>,
     pub max_state_tokens: Option<usize>,
     pub truncation: Option<Truncation>,
-}
-
-impl Default for DecideOptions {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            max_state_tokens: None,
-            truncation: None,
-        }
-    }
 }
 
 impl DecideOptions {
@@ -156,19 +161,17 @@ pub struct ModelInfo {
     /// The Hugging Face repository the snapshot comes from.
     pub repo: &'static str,
     pub weights_dir: PathBuf,
-    /// `tokenizer.json`, `model.safetensors.index.json`, `joint_head.safetensors`,
-    /// and `joint_head_config.json` are present. The shards the index names are
-    /// checked while loading.
+    /// `tokenizer.json`, `config.json`, and `model.safetensors` are present.
     pub ready: bool,
 }
 
 pub struct FuzzyDecision {
     limits: QuestionLimits,
-    temperature: f32,
+    user_temperature: Option<f32>,
     max_state_tokens: usize,
-    max_length: usize,
+    max_length: Option<usize>,
     truncation: Truncation,
-    model: Clef,
+    session: Session<Wgpu>,
 }
 
 impl std::fmt::Debug for FuzzyDecision {
@@ -183,7 +186,9 @@ impl std::fmt::Debug for FuzzyDecision {
 pub enum Error {
     #[error("Question {label} needs non-empty instructions.")]
     EmptyInstructions { label: String },
-    #[error("Question {label} has unknown type \"{got}\". Expected \"choice\", \"score\" or \"noul\".")]
+    #[error(
+        "Question {label} has unknown type \"{got}\". Expected \"choice\", \"score\" or \"noul\"."
+    )]
     UnknownType { label: String, got: String },
     #[error("Question {label} ({kind}) needs between {min} and {max} options for this model, got {got}.")]
     OptionCount {
@@ -201,9 +206,8 @@ pub enum Error {
     UnknownOption { option: String },
     #[error("temperature must be finite and greater than 0, got {value}")]
     Temperature { value: f32 },
-    /// Clef-Flash packs the state and every question into one sequence, so
-    /// per-question row limits no longer apply. Kept for callers matching on
-    /// this variant; it is not produced.
+    /// Kept for callers matching on this variant. d1 scores one question per
+    /// sequence, so a row limit is not produced.
     #[error(
         "a question needs {question_tokens} tokens with a {state_tokens}-token state, past the {limit} token row limit"
     )]
@@ -216,30 +220,29 @@ pub enum Error {
     Context { message: String },
     #[error("State needs {state_tokens} tokens and only {kept} fit in the context.")]
     Truncated { state_tokens: usize, kept: usize },
-    #[error("only clef-flash is implemented, got {model}")]
+    #[error("only d1-omni-600M is implemented, got {model}")]
     UnsupportedModel { model: String },
     #[error("missing {file} in {}", dir.display())]
     MissingFile { dir: PathBuf, file: &'static str },
     #[error("{message}")]
     Weights { message: String },
+    #[error("{message}")]
+    Audio { message: String },
 }
 
 pub(crate) fn limits() -> QuestionLimits {
     QuestionLimits {
-        min_choice_options: 1,
+        min_choice_options: 2,
         max_choice_options: 255,
         min_score_levels: 2,
-        max_score_levels: 255,
+        max_score_levels: 10,
     }
 }
 
-const DEFAULT_TEMPERATURE: f32 = 1.0;
 pub(crate) const DEFAULT_MAX_STATE: usize = 16384;
-pub(crate) const DEFAULT_MAX_LENGTH: usize = 16384;
 
 impl FuzzyDecision {
-    /// Load Clef-Flash from `dir`. The directory must already hold the
-    /// snapshot files.
+    /// Load d1-omni-600M from `dir`. The directory must already hold the snapshot.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
         Self::load(LoadOptions::dir(dir.as_ref()))
     }
@@ -257,14 +260,14 @@ impl FuzzyDecision {
             .weights_dir
             .clone()
             .unwrap_or_else(weights::default_weights_dir);
-        let model = Clef::load(&dir, false)?;
+        let session = Session::<Wgpu>::load(&dir, Which::TextAudio)?;
         Ok(Self {
             limits: limits(),
-            temperature: options.temperature.unwrap_or(DEFAULT_TEMPERATURE),
+            user_temperature: options.temperature,
             max_state_tokens: options.max_state_tokens.unwrap_or(DEFAULT_MAX_STATE),
-            max_length: options.max_length.unwrap_or(DEFAULT_MAX_LENGTH),
+            max_length: options.max_length,
             truncation: options.truncation,
-            model,
+            session,
         })
     }
 
@@ -275,25 +278,19 @@ impl FuzzyDecision {
             .weights_dir
             .clone()
             .unwrap_or_else(weights::default_weights_dir);
-        let ready = clef::weights_ready(&weights_dir);
         ModelInfo {
             model: DEFAULT_MODEL,
             repo: MODEL_REPO,
-            weights_dir,
-            ready,
+            weights_dir: weights_dir.clone(),
+            ready: ready(&weights_dir),
         }
     }
 
     pub fn count_tokens(&self, text: &str) -> usize {
-        self.model.tokenizer.count(text)
+        self.session.tokenizer.count(text)
     }
 
-    /// Yes/no on `statement`. `answer` is true when the yes probability is at least 0.5.
-    pub fn noul(
-        &self,
-        state: &str,
-        statement: impl Into<String>,
-    ) -> Result<NoulAnswer, Error> {
+    pub fn noul(&self, state: &str, statement: impl Into<String>) -> Result<NoulAnswer, Error> {
         self.noul_with(state, statement, DecideOptions::default())
     }
 
@@ -303,7 +300,7 @@ impl FuzzyDecision {
         statement: impl Into<String>,
         options: DecideOptions,
     ) -> Result<NoulAnswer, Error> {
-        match self.one(state, noul(statement), options)? {
+        match self.one(state, noul(statement), options, None, Modality::Text)? {
             Answer::Noul {
                 answer,
                 probability,
@@ -317,7 +314,6 @@ impl FuzzyDecision {
         }
     }
 
-    /// Pick one of `options`. Probabilities sum to 1 over those options.
     pub fn choice(
         &self,
         state: &str,
@@ -335,7 +331,13 @@ impl FuzzyDecision {
         descriptions: Option<&[(&str, &str)]>,
         decide: DecideOptions,
     ) -> Result<ChoiceAnswer, Error> {
-        match self.one(state, choice(instructions, options, descriptions), decide)? {
+        match self.one(
+            state,
+            choice(instructions, options, descriptions),
+            decide,
+            None,
+            Modality::Text,
+        )? {
             Answer::Choice {
                 choice,
                 confidence,
@@ -349,7 +351,6 @@ impl FuzzyDecision {
         }
     }
 
-    /// Expected level index over `levels`, which are ordered from low to high.
     pub fn score(
         &self,
         state: &str,
@@ -366,7 +367,13 @@ impl FuzzyDecision {
         levels: &[&str],
         options: DecideOptions,
     ) -> Result<ScoreAnswer, Error> {
-        match self.one(state, score(instructions, levels), options)? {
+        match self.one(
+            state,
+            score(instructions, levels),
+            options,
+            None,
+            Modality::Text,
+        )? {
             Answer::Score {
                 score,
                 normalized,
@@ -384,22 +391,13 @@ impl FuzzyDecision {
         }
     }
 
-    fn one(&self, state: &str, question: Question, options: DecideOptions) -> Result<Answer, Error> {
-        let mut answers = self.decide(state, &[question], options)?;
-        Ok(answers.pop().expect("one question returns one answer"))
-    }
-
     pub fn decide(
         &self,
         state: &str,
         questions: &[Question],
         options: DecideOptions,
     ) -> Result<Vec<Answer>, Error> {
-        for (index, question) in questions.iter().enumerate() {
-            validate_question(question, &format!("#{index}"), self.limits)?;
-        }
-        let ids: Vec<String> = (1..=questions.len()).map(|n| format!("q{n}")).collect();
-        self.decide_validated(state, questions, &ids, &options)
+        self.decide_mode(state, questions, options, None, Modality::Text)
     }
 
     pub fn decide_map(
@@ -408,54 +406,341 @@ impl FuzzyDecision {
         questions: &BTreeMap<String, Question>,
         options: DecideOptions,
     ) -> Result<BTreeMap<String, Answer>, Error> {
-        let mut ordered: Vec<(String, Question)> = Vec::with_capacity(questions.len());
+        let mut ordered = Vec::with_capacity(questions.len());
         for (key, question) in questions {
             validate_question(question, key, self.limits)?;
             ordered.push((key.clone(), question.clone()));
         }
-        let ids: Vec<String> = ordered.iter().map(|(key, _)| key.clone()).collect();
-        let qs: Vec<Question> = ordered.iter().map(|(_, q)| q.clone()).collect();
-        let answers = self.decide_validated(state, &qs, &ids, &options)?;
+        let qs: Vec<Question> = ordered
+            .iter()
+            .map(|(_, question)| question.clone())
+            .collect();
+        let answers = self.decide_validated(state, &qs, &options, None, Modality::Text)?;
         Ok(ordered
             .into_iter()
-            .map(|(k, _)| k)
+            .map(|(key, _)| key)
             .zip(answers)
             .collect())
+    }
+
+    /// Score `questions` over a clip. Pass `"{}"` when the clip is the whole state.
+    /// Samples that are not 16 kHz mono are linearly resampled and averaged.
+    /// The waveform is then cut to 30 s and padded to 0.5 s.
+    pub fn decide_audio(
+        &self,
+        audio: &AudioClip,
+        state: &str,
+        questions: &[Question],
+        options: DecideOptions,
+    ) -> Result<Vec<Answer>, Error> {
+        let prefix = self.session.audio_prefix(&audio.at_16k())?;
+        self.decide_mode(state, questions, options, Some(prefix), Modality::Audio)
+    }
+
+    pub fn choice_audio(
+        &self,
+        audio: &AudioClip,
+        state: &str,
+        instructions: impl Into<String>,
+        options: &[&str],
+        descriptions: Option<&[(&str, &str)]>,
+    ) -> Result<ChoiceAnswer, Error> {
+        match self.one(
+            state,
+            choice(instructions, options, descriptions),
+            DecideOptions::default(),
+            Some(self.session.audio_prefix(&audio.at_16k())?),
+            Modality::Audio,
+        )? {
+            Answer::Choice {
+                choice,
+                confidence,
+                probabilities,
+            } => Ok(ChoiceAnswer {
+                choice,
+                confidence,
+                probabilities,
+            }),
+            _ => unreachable!("choice decodes to a choice answer"),
+        }
+    }
+
+    pub fn noul_audio(
+        &self,
+        audio: &AudioClip,
+        state: &str,
+        statement: impl Into<String>,
+    ) -> Result<NoulAnswer, Error> {
+        match self.one(
+            state,
+            noul(statement),
+            DecideOptions::default(),
+            Some(self.session.audio_prefix(&audio.at_16k())?),
+            Modality::Audio,
+        )? {
+            Answer::Noul {
+                answer,
+                probability,
+                confidence,
+            } => Ok(NoulAnswer {
+                answer,
+                probability,
+                confidence,
+            }),
+            _ => unreachable!("noul decodes to a noul answer"),
+        }
+    }
+
+    pub fn score_audio(
+        &self,
+        audio: &AudioClip,
+        state: &str,
+        instructions: impl Into<String>,
+        levels: &[&str],
+    ) -> Result<ScoreAnswer, Error> {
+        match self.one(
+            state,
+            score(instructions, levels),
+            DecideOptions::default(),
+            Some(self.session.audio_prefix(&audio.at_16k())?),
+            Modality::Audio,
+        )? {
+            Answer::Score {
+                score,
+                normalized,
+                level,
+                confidence,
+                probabilities,
+            } => Ok(ScoreAnswer {
+                score,
+                normalized,
+                level,
+                confidence,
+                probabilities,
+            }),
+            _ => unreachable!("score decodes to a score answer"),
+        }
+    }
+
+    fn one(
+        &self,
+        state: &str,
+        question: Question,
+        options: DecideOptions,
+        prefix: Option<Tensor<Wgpu, 2>>,
+        modality: Modality,
+    ) -> Result<Answer, Error> {
+        let mut answers = self.decide_mode(state, &[question], options, prefix, modality)?;
+        Ok(answers.pop().expect("one question returns one answer"))
+    }
+
+    fn decide_mode(
+        &self,
+        state: &str,
+        questions: &[Question],
+        options: DecideOptions,
+        prefix: Option<Tensor<Wgpu, 2>>,
+        modality: Modality,
+    ) -> Result<Vec<Answer>, Error> {
+        for (index, question) in questions.iter().enumerate() {
+            validate_question(question, &format!("#{index}"), self.limits)?;
+        }
+        self.decide_validated(state, questions, &options, prefix, modality)
     }
 
     fn decide_validated(
         &self,
         state: &str,
         questions: &[Question],
-        question_ids: &[String],
         options: &DecideOptions,
+        prefix: Option<Tensor<Wgpu, 2>>,
+        modality: Modality,
     ) -> Result<Vec<Answer>, Error> {
-        let temperature = options.temperature.unwrap_or(self.temperature);
-        check_temperature(temperature)?;
         if questions.is_empty() {
             return Ok(Vec::new());
         }
         let strict = options.truncation.unwrap_or(self.truncation) == Truncation::Error;
-        let layout = encode_record(
-            &self.model.tokenizer,
-            state,
-            None,
-            questions,
-            question_ids,
-            self.max_length,
-            options.max_state_tokens.unwrap_or(self.max_state_tokens),
-            strict,
-        )?;
-        let (logits, _) = self.model.score(&layout, None, None, None, false)?;
-        Ok(questions
-            .iter()
-            .zip(logits)
-            .map(|(question, question_logits)| decode_answer(question, &question_logits, temperature))
-            .collect())
+        let prefix_len = prefix.as_ref().map(|prefix| prefix.dims()[0]).unwrap_or(0);
+        let max_len = self
+            .session
+            .text_limit(modality, prefix_len, self.max_length)?;
+        let max_state = options.max_state_tokens.unwrap_or(self.max_state_tokens);
+        let calibrate = modality == Modality::Text;
+        let mut answers = Vec::with_capacity(questions.len());
+        for question in questions {
+            let encoded = encode(
+                &self.session.tokenizer,
+                state,
+                question,
+                max_len,
+                modality,
+                max_state,
+                strict,
+            )?;
+            let logits = self.session.question_logits(
+                prefix.as_ref(),
+                &encoded.ids,
+                encoded.qtype,
+                &encoded.markers,
+            )?;
+            let temperature =
+                self.temperature_for(options, kind_name(question), encoded.n_options, calibrate)?;
+            answers.push(decode_answer(question, &logits, temperature));
+        }
+        Ok(answers)
+    }
+
+    fn temperature_for(
+        &self,
+        options: &DecideOptions,
+        kind: &str,
+        n_options: usize,
+        calibrate: bool,
+    ) -> Result<f32, Error> {
+        let temperature = match options.temperature.or(self.user_temperature) {
+            Some(temperature) => temperature,
+            None if calibrate => self.session.calibrated(kind, n_options),
+            None => 1.0,
+        };
+        check_temperature(temperature)?;
+        Ok(temperature)
     }
 }
 
-fn check_temperature(temperature: f32) -> Result<(), Error> {
+struct CachedPrefix {
+    stamp: u64,
+    prefix: Tensor<Wgpu, 2>,
+}
+
+/// Image decisions. The vision tower output is reused when the same image is
+/// scored again. Each call is still one question, and it does not see other
+/// questions.
+pub struct VisionDecision {
+    session: Session<Wgpu>,
+    prefix: RefCell<Option<CachedPrefix>>,
+}
+
+impl VisionDecision {
+    /// Load d1-omni-600M with its vision tower from `dir`.
+    pub fn load(dir: impl AsRef<Path>) -> Result<Self, Error> {
+        Ok(Self {
+            session: Session::<Wgpu>::load(dir.as_ref(), Which::Vision)?,
+            prefix: RefCell::new(None),
+        })
+    }
+
+    pub fn choice(
+        &self,
+        image: &RgbImage,
+        state: &str,
+        instructions: &str,
+        options: &[&str],
+    ) -> Result<ChoiceAnswer, Error> {
+        match self.one(image, state, choice(instructions, options, None))? {
+            Answer::Choice {
+                choice,
+                confidence,
+                probabilities,
+            } => Ok(ChoiceAnswer {
+                choice,
+                confidence,
+                probabilities,
+            }),
+            _ => unreachable!("choice decodes to a choice answer"),
+        }
+    }
+
+    pub fn noul(
+        &self,
+        image: &RgbImage,
+        state: &str,
+        statement: &str,
+    ) -> Result<NoulAnswer, Error> {
+        match self.one(image, state, noul(statement))? {
+            Answer::Noul {
+                answer,
+                probability,
+                confidence,
+            } => Ok(NoulAnswer {
+                answer,
+                probability,
+                confidence,
+            }),
+            _ => unreachable!("noul decodes to a noul answer"),
+        }
+    }
+
+    pub fn score(
+        &self,
+        image: &RgbImage,
+        state: &str,
+        instructions: &str,
+        levels: &[&str],
+    ) -> Result<ScoreAnswer, Error> {
+        match self.one(image, state, score(instructions, levels))? {
+            Answer::Score {
+                score,
+                normalized,
+                level,
+                confidence,
+                probabilities,
+            } => Ok(ScoreAnswer {
+                score,
+                normalized,
+                level,
+                confidence,
+                probabilities,
+            }),
+            _ => unreachable!("score decodes to a score answer"),
+        }
+    }
+
+    fn one(&self, image: &RgbImage, state: &str, question: Question) -> Result<Answer, Error> {
+        validate_question(&question, "vision", limits())?;
+        let stamp = image_stamp(image);
+        let cached = self
+            .prefix
+            .borrow()
+            .as_ref()
+            .map(|cached| cached.stamp == stamp)
+            .unwrap_or(false);
+        let logits = if cached {
+            let slot = self.prefix.borrow();
+            let prefix = &slot.as_ref().expect("cache checked").prefix;
+            self.logits_for(state, &question, prefix)?
+        } else {
+            let prefix = self.session.vision_prefix(image)?;
+            let logits = self.logits_for(state, &question, &prefix)?;
+            *self.prefix.borrow_mut() = Some(CachedPrefix { stamp, prefix });
+            logits
+        };
+        Ok(decode_answer(&question, &logits, 1.0))
+    }
+
+    fn logits_for(
+        &self,
+        state: &str,
+        question: &Question,
+        prefix: &Tensor<Wgpu, 2>,
+    ) -> Result<Vec<f32>, Error> {
+        let max_len = self
+            .session
+            .text_limit(Modality::Vision, prefix.dims()[0], None)?;
+        let encoded = encode(
+            &self.session.tokenizer,
+            state,
+            question,
+            max_len,
+            Modality::Vision,
+            DEFAULT_MAX_STATE,
+            false,
+        )?;
+        self.session
+            .question_logits(Some(prefix), &encoded.ids, encoded.qtype, &encoded.markers)
+    }
+}
+
+pub(crate) fn check_temperature(temperature: f32) -> Result<(), Error> {
     if temperature.is_finite() && temperature > 0.0 {
         Ok(())
     } else {
@@ -488,6 +773,28 @@ mod tests {
         let info = FuzzyDecision::info(&LoadOptions::default());
         assert_eq!(info.model, DEFAULT_MODEL);
         assert_eq!(info.repo, MODEL_REPO);
-        assert!(info.weights_dir.ends_with("clef-flash"));
+        assert!(info.weights_dir.ends_with("d1-omni-600M"));
+    }
+
+    #[test]
+    fn limits_follow_the_d1_head() {
+        let limits = limits();
+        assert_eq!(limits.min_choice_options, 2);
+        assert_eq!(limits.max_choice_options, 255);
+        assert_eq!(limits.max_score_levels, 10);
+        let err = validate_question(&score("Rate", &["only"]), "q", limits).unwrap_err();
+        assert!(matches!(err, Error::OptionCount { min: 2, got: 1, .. }));
+        let err = validate_question(&choice("Pick", &["only"], None), "q", limits).unwrap_err();
+        assert!(matches!(err, Error::OptionCount { min: 2, got: 1, .. }));
+        let many = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"];
+        let err = validate_question(&score("Rate", &many), "q", limits).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::OptionCount {
+                max: 10,
+                got: 11,
+                ..
+            }
+        ));
     }
 }

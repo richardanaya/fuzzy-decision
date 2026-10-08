@@ -1,4 +1,4 @@
-//! Professional and common classification questions. One load of models/clef-flash.
+//! Professional and common classification questions. One load of models/d1-omni-600M.
 //! Writes text_eval.html next to Cargo.toml.
 //!
 //! ```text
@@ -58,7 +58,9 @@ fn esc(text: &str) -> String {
 fn write_report(outcomes: &[Outcome]) {
     let mut by_domain: BTreeMap<&str, (usize, usize, f32)> = BTreeMap::new();
     for outcome in outcomes {
-        let slot = by_domain.entry(outcome.domain.as_str()).or_insert((0, 0, 0.0));
+        let slot = by_domain
+            .entry(outcome.domain.as_str())
+            .or_insert((0, 0, 0.0));
         slot.0 += 1;
         if outcome.hit {
             slot.1 += 1;
@@ -152,13 +154,13 @@ fn write_report(outcomes: &[Outcome]) {
 <body>
   <header>
     <p class="meta">fuzzy-decision &nbsp;·&nbsp; classification report &nbsp;·&nbsp; {date}</p>
-    <h1>How Clef-Flash does on ordinary classification</h1>
+    <h1>How d1-omni-600M does on ordinary classification</h1>
     <p class="figure">{total_hit} / {total_n} &nbsp; <span class="meta">{pct:.0}%</span></p>
     <p>Each item is a short workplace or everyday text, one question, and a closed set of answers. The model must pick from that set. It does not write a free-form answer.</p>
   </header>
 
   <h2>What was measured</h2>
-  <p>The checkpoint is Cloudflare's Clef-Flash, loaded from <code>models/clef-flash</code>. {domain_count} domains, {total_n} items. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Temperature stayed at 1.</p>
+  <p>The checkpoint is Liquid AI's d1-omni-600M, loaded from <code>models/d1-omni-600M</code>. {domain_count} domains, {total_n} items. Choice and yes/no items count as a hit only when the labeled label is the one selected. Ordered items count as a hit only when the nearest level is the labeled level. Confidence is the probability of the selected answer. The same inputs return the same answer. Text questions use the temperatures in the checkpoint config.</p>
   <p>Domains: {domain_list}. Some situations are repeated with a short filing prefix so the set reaches 1000 items. The label does not change.</p>
 
   <h2>Results by domain</h2>
@@ -211,13 +213,13 @@ fn write_report(outcomes: &[Outcome]) {
 
 fn main() -> ExitCode {
     let options = LoadOptions {
-        weights_dir: Some("models/clef-flash".into()),
+        weights_dir: Some("models/d1-omni-600M".into()),
         ..LoadOptions::default()
     };
     let info = FuzzyDecision::info(&options);
     if !info.ready {
         eprintln!(
-            "weights are not ready in {} (need tokenizer.json, model.safetensors.index.json plus its shards, joint_head.safetensors, joint_head_config.json)",
+            "weights are not ready in {} (need tokenizer.json, config.json, and model.safetensors)",
             info.weights_dir.display()
         );
         return ExitCode::from(2);
@@ -236,9 +238,15 @@ fn main() -> ExitCode {
     eprintln!("items {}", bank.len());
     for (index, item) in bank.into_iter().enumerate() {
         let (question, gold, got, confidence, hit) = match &item.ask {
-            Ask::Choice { instructions, options, gold } => {
+            Ask::Choice {
+                instructions,
+                options,
+                gold,
+            } => {
                 let opts: Vec<&str> = options.iter().map(String::as_str).collect();
-                let answer = decider.choice(&item.state, instructions, &opts).unwrap_or_else(|err| panic!("{err}"));
+                let answer = decider
+                    .choice(&item.state, instructions, &opts)
+                    .unwrap_or_else(|err| panic!("{err}"));
                 (
                     instructions.clone(),
                     gold.clone(),
@@ -248,7 +256,9 @@ fn main() -> ExitCode {
                 )
             }
             Ask::Noul { statement, gold } => {
-                let answer = decider.noul(&item.state, statement).unwrap_or_else(|err| panic!("{err}"));
+                let answer = decider
+                    .noul(&item.state, statement)
+                    .unwrap_or_else(|err| panic!("{err}"));
                 (
                     statement.clone(),
                     gold.to_string(),
@@ -257,9 +267,15 @@ fn main() -> ExitCode {
                     answer.answer == *gold,
                 )
             }
-            Ask::Score { instructions, levels, gold } => {
+            Ask::Score {
+                instructions,
+                levels,
+                gold,
+            } => {
                 let levels_ref: Vec<&str> = levels.iter().map(String::as_str).collect();
-                let answer = decider.score(&item.state, instructions, &levels_ref).unwrap_or_else(|err| panic!("{err}"));
+                let answer = decider
+                    .score(&item.state, instructions, &levels_ref)
+                    .unwrap_or_else(|err| panic!("{err}"));
                 (
                     instructions.clone(),
                     gold.clone(),

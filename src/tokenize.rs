@@ -1,17 +1,21 @@
-//! Clef-Flash tokenizer: the Qwen3.5 tokenizer plus the delimiter escaping
-//! this crate applies to user text.
+//! d1 tokenizer. User text is encoded with special tokens off, then the
+//! prompt inserts `<|startoftext|>` and the reserved delimiters by id.
 
 use std::path::Path;
 
 use tokenizers::Tokenizer;
 
-use crate::record::TemplateEncoder;
+use crate::prompt::TextEncoder;
 
 pub struct HfTokenizer {
     inner: Tokenizer,
-    vision_start: u32,
-    vision_end: u32,
-    image_pad: u32,
+    bos: u32,
+    state: u32,
+    q: u32,
+    opt: u32,
+    opt_end: u32,
+    decide: u32,
+    marker: u32,
 }
 
 impl HfTokenizer {
@@ -24,50 +28,60 @@ impl HfTokenizer {
                 .ok_or_else(|| format!("tokenizer is missing {name}"))
         };
         Ok(Self {
-            vision_start: id("<|vision_start|>")?,
-            vision_end: id("<|vision_end|>")?,
-            image_pad: id("<|image_pad|>")?,
+            bos: id("<|startoftext|>")?,
+            state: id("<|reserved_7|>")?,
+            q: id("<|reserved_8|>")?,
+            opt: id("<|reserved_9|>")?,
+            opt_end: id("<|reserved_10|>")?,
+            decide: id("<|reserved_11|>")?,
+            marker: id("<|mask|>")?,
             inner,
         })
     }
 
     pub fn count(&self, text: &str) -> usize {
-        self.encode_user(text).len()
+        self.piece(text).len()
     }
 
-    /// Template text. Special tokens such as `<|im_start|>` stay special.
-    pub fn encode_raw(&self, text: &str) -> Vec<u32> {
+    fn encode_plain(&self, text: &str) -> Vec<u32> {
         self.inner
             .encode(text, false)
-            .map(|enc| enc.get_ids().to_vec())
+            .map(|encoding| encoding.get_ids().to_vec())
             .unwrap_or_default()
-    }
-
-    /// User text. `<|name|>` spellings are escaped so user text cannot
-    /// close the state or inject chat delimiters.
-    pub fn encode_user(&self, text: &str) -> Vec<u32> {
-        self.encode_raw(&escape_delimiters(text))
-    }
-
-    /// `<|vision_start|>`, `n` image slots, `<|vision_end|>`, and the newline
-    /// the Clef processor appends after the media block.
-    pub fn media_ids(&self, n_image: usize) -> Vec<u32> {
-        let mut ids = Vec::with_capacity(n_image + 3);
-        ids.push(self.vision_start);
-        ids.extend(std::iter::repeat(self.image_pad).take(n_image));
-        ids.push(self.vision_end);
-        ids.extend(self.encode_raw("\n"));
-        ids
     }
 }
 
-impl TemplateEncoder for HfTokenizer {
-    fn raw(&self, text: &str) -> Vec<u32> {
-        self.encode_raw(text)
+impl TextEncoder for HfTokenizer {
+    fn piece(&self, text: &str) -> Vec<u32> {
+        self.encode_plain(&escape_delimiters(text))
     }
 
-    fn user(&self, text: &str) -> Vec<u32> {
-        self.encode_user(text)
+    fn bos(&self) -> u32 {
+        self.bos
+    }
+
+    fn delim_state(&self) -> u32 {
+        self.state
+    }
+
+    fn delim_q(&self) -> u32 {
+        self.q
+    }
+
+    fn delim_opt(&self) -> u32 {
+        self.opt
+    }
+
+    fn delim_opt_end(&self) -> u32 {
+        self.opt_end
+    }
+
+    fn delim_decide(&self) -> u32 {
+        self.decide
+    }
+
+    fn marker(&self) -> u32 {
+        self.marker
     }
 }
 
@@ -81,6 +95,7 @@ impl TokenCounter for HfTokenizer {
     }
 }
 
+/// `<|name|>` becomes `<¦name¦>`, so caller text cannot emit a delimiter.
 pub fn escape_delimiters(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
@@ -89,7 +104,10 @@ pub fn escape_delimiters(text: &str) -> String {
         if bytes[i] == b'<' && i + 1 < bytes.len() && bytes[i + 1] == b'|' {
             if let Some(end) = find_close(bytes, i + 2) {
                 let name = &text[i + 2..end];
-                if name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                if name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                {
                     out.push_str("<¦");
                     out.push_str(name);
                     out.push_str("¦>");
