@@ -1,186 +1,172 @@
-//! Parity tests against fixtures produced by the reference Python
-//! implementation in `Cloudflare/clef-flash` (`joint_schema_model.py`).
-//!
-//! `tests/data/head_fixture.safetensors` holds a small random joint head, a
-//! synthetic record, and the logits PyTorch computed for it.
-//! `tests/data/encoding_fixture.safetensors` holds the ids and spans the
-//! reference `encode_record` produced over `tests/data/small_tokenizer.json`.
-//! The scripts that build them are linked from the pull request that added
-//! this module; regenerating them needs only `torch`, `tokenizers`, and
-//! `safetensors`.
+//! Parity against fixtures generated from the d1 reference (`audio.py`,
+//! `encoder.py`, `vision.py`) with tiny or random weights.
 
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::NdArray;
-use burn::tensor::{Tensor, TensorData};
 use safetensors::SafeTensors;
 
-use crate::head::{HeadConfig, HeadQuestion, JointSchemaHead};
-use crate::questions::{choice, noul, score, Question};
-use crate::record::encode_record;
-use crate::tokenize::HfTokenizer;
-use crate::weights::to_f32;
+use crate::conformer::AudioTower;
+use crate::head::DecisionHead;
+use crate::mel::{log_mel, prepare_waveform};
+use crate::nn::{tensor2, to_vec};
+use crate::resample::resize_hwc;
+use crate::trunk::Trunk;
+use crate::vision::VisionTower;
+use crate::weights::{to_f32, AudioSpec, LayerKind, Snapshot, TensorSource, TrunkSpec, VisionSpec};
 
 type B = NdArray<f32>;
 
-fn fixture_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data")
-        .join(name)
+fn fixture(name: &str) -> Snapshot {
+    Snapshot::open(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name),
+    )
+    .unwrap_or_else(|err| panic!("open {name}: {err}"))
 }
 
-fn values(tensors: &SafeTensors<'_>, name: &str) -> (Vec<f32>, Vec<usize>) {
-    let view = tensors.tensor(name).unwrap_or_else(|err| panic!("{name}: {err}"));
-    (to_f32(&view).expect("fixture dtype"), view.shape().to_vec())
+fn values(source: &Snapshot, name: &str) -> (Vec<f32>, Vec<usize>) {
+    source
+        .tensor(name)
+        .unwrap_or_else(|err| panic!("{name}: {err}"))
 }
 
-fn span_of(values: &[f32]) -> (usize, usize) {
-    (values[0] as usize, values[1] as usize)
+fn assert_close(got: &[f32], expected: &[f32], atol: f32, label: &str) {
+    assert_eq!(got.len(), expected.len(), "{label} length");
+    let mut max = 0.0f32;
+    for (left, right) in got.iter().zip(expected) {
+        max = max.max((left - right).abs());
+    }
+    assert!(max <= atol, "{label} max abs {max} > {atol}");
 }
 
 #[test]
-fn head_matches_the_reference_forward() {
-    let bytes = std::fs::read(fixture_path("head_fixture.safetensors")).expect("head fixture");
-    let tensors = SafeTensors::deserialize(&bytes).expect("fixture file");
-    let (config_values, _) = values(&tensors, "fixture.config");
-    let config = HeadConfig {
-        hidden_size: config_values[0] as usize,
-        width: config_values[1] as usize,
-        routing_layers: config_values[2] as usize,
-        layers: config_values[3] as usize,
-        heads: config_values[4] as usize,
-        feedforward: config_values[5] as usize,
+fn mel_matches_the_reference_frontend() {
+    let source = fixture("mel_fixture.safetensors");
+    let (samples, _) = values(&source, "fixture.samples");
+    let (expected, shape) = values(&source, "fixture.mel");
+    let wave = prepare_waveform(&samples);
+    let mel = log_mel(&wave);
+    assert_eq!(mel.n_mels, shape[0]);
+    assert_eq!(mel.frames, shape[1]);
+    assert_eq!(mel.valid, 50);
+    assert_close(&mel.features, &expected, 2e-4, "mel");
+}
+
+#[test]
+fn trunk_matches_the_reference_forward() {
+    let source = fixture("trunk_fixture.safetensors");
+    let spec = TrunkSpec {
+        hidden: 32,
+        intermediate: 48,
+        heads: 4,
+        kv_heads: 2,
+        layers: vec![LayerKind::Conv, LayerKind::Attention],
+        eps: 1e-5,
+        multiple_of: 8,
+        ffn_multiplier: 1.0,
+        rope_theta: 10_000.0,
     };
     let device = NdArrayDevice::default();
-    let head = JointSchemaHead::<B>::load(&bytes, config, &device).expect("load head");
-
-    let (hidden_values, hidden_shape) = values(&tensors, "fixture.hidden");
-    let seq = hidden_shape[0];
-    let hidden = Tensor::<B, 2>::from_data(
-        TensorData::new(hidden_values, [seq, config.hidden_size]),
-        &device,
-    );
-    let (id_values, _) = values(&tensors, "fixture.input_ids");
-    let input_ids: Vec<u32> = id_values.iter().map(|id| *id as u32).collect();
-    let (embedding, embedding_shape) = values(&tensors, "fixture.embedding");
-    assert_eq!(embedding_shape[1], config.hidden_size);
-
-    let mut questions = Vec::new();
-    let mut lexical = Vec::new();
-    let mut expected = Vec::new();
-    for index in 0.. {
-        let name = format!("fixture.question.{index}");
-        if tensors.tensor(&name).is_err() {
-            break;
-        }
-        let (meta, _) = values(&tensors, &name);
-        let (spans, spans_shape) = values(&tensors, &format!("fixture.option_spans.{index}"));
-        let option_spans: Vec<(usize, usize)> = (0..spans_shape[0])
-            .map(|row| span_of(&spans[row * 2..row * 2 + 2]))
-            .collect();
-        let mut rows = Vec::with_capacity(option_spans.len() * config.hidden_size);
-        for (start, end) in &option_spans {
-            let mut mean = vec![0f32; config.hidden_size];
-            for id in &input_ids[*start..*end] {
-                let row = &embedding[*id as usize * config.hidden_size..];
-                for (slot, value) in mean.iter_mut().zip(row) {
-                    *slot += value;
-                }
-            }
-            for slot in &mut mean {
-                *slot /= (end - start) as f32;
-            }
-            rows.extend(mean);
-        }
-        lexical.push(Tensor::<B, 2>::from_data(
-            TensorData::new(rows, [option_spans.len(), config.hidden_size]),
-            &device,
-        ));
-        questions.push(HeadQuestion {
-            question_type: meta[0] as usize,
-            question_span: span_of(&meta[1..3]),
-            option_spans,
-        });
-        let (logits, _) = values(&tensors, &format!("fixture.logits.{index}"));
-        expected.push(logits);
-    }
-    assert_eq!(questions.len(), 3, "the fixture has three questions");
-
-    let normalized = head.normalized(hidden);
-    let memory = head.memory(normalized.clone());
-    let results = head.score(memory, normalized, 0, &questions, lexical);
-
-    for (result, want) in results.iter().zip(&expected) {
-        assert_eq!(result.len(), want.len());
-        for (got, want) in result.iter().zip(want) {
-            assert!(
-                (got - want).abs() < 3e-4,
-                "logit {got} differs from the reference {want}"
-            );
-        }
-    }
+    let trunk = Trunk::<B>::load(&source, &spec, &device).expect("trunk");
+    let (input, shape) = values(&source, "fixture.input");
+    let hidden = tensor2(input, shape[0], shape[1], &device);
+    let prefix = values(&source, "fixture.prefix").0[0] as usize;
+    let got = to_vec(trunk.forward(hidden, prefix));
+    let (expected, _) = values(&source, "fixture.output");
+    assert_close(&got, &expected, 2e-4, "trunk");
 }
 
 #[test]
-fn encoding_matches_the_reference_layout() {
-    let tokenizer =
-        HfTokenizer::open(&fixture_path("small_tokenizer.json")).expect("small tokenizer");
-    let bytes = std::fs::read(fixture_path("encoding_fixture.safetensors")).expect("encoding fixture");
-    let tensors = SafeTensors::deserialize(&bytes).expect("fixture file");
+fn head_matches_the_reference_logits() {
+    let source = fixture("head_fixture.safetensors");
+    let device = NdArrayDevice::default();
+    let head = DecisionHead::<B>::load(&source, 64, 2, &device).expect("head");
+    let (hidden, shape) = values(&source, "fixture.hidden");
+    let markers: Vec<usize> = values(&source, "fixture.markers")
+        .0
+        .iter()
+        .map(|value| *value as usize)
+        .collect();
+    let qtype = values(&source, "fixture.qtype").0[0] as usize;
+    let got = head.logits(
+        tensor2(hidden, shape[0], shape[1], &device),
+        qtype,
+        &markers,
+    );
+    let (expected, _) = values(&source, "fixture.logits");
+    assert_close(&got, &expected, 2e-4, "head");
+}
 
-    let records: Vec<(&str, Vec<Question>, Vec<String>)> = vec![
-        (
-            "Our checkout started returning errors and orders are blocked.",
-            vec![
-                choice(
-                    "Which team should handle the message?",
-                    &["billing", "technical"],
-                    Some(&[
-                        ("billing", "Payments or invoices"),
-                        ("technical", "Bugs or outages"),
-                    ]),
-                ),
-                score("urgency", &["Can wait", "This week", "Today"]),
-                noul("Is a service down?"),
-            ],
-            vec!["department".into(), "urgency".into(), "outage".into()],
-        ),
-        (
-            "A note with unicode: café — 15°, and \"quotes\" plus a \\ backslash.\nSecond line.",
-            vec![choice("Pick a label.", &["zeta", "alpha"], None)],
-            vec!["pick".into()],
-        ),
-    ];
+#[test]
+fn audio_tower_matches_the_reference() {
+    let source = fixture("audio_fixture.safetensors");
+    let spec = AudioSpec {
+        feat_in: 8,
+        layers: 1,
+        d_model: 32,
+        channels: 4,
+        ff_expansion: 2,
+        heads: 4,
+        kernel: 3,
+        residual_width: 8,
+    };
+    let device = NdArrayDevice::default();
+    let tower = AudioTower::<B>::load(&source, &spec, &device).expect("audio");
+    let (mel, shape) = values(&source, "fixture.mel");
+    let valid = values(&source, "fixture.lengths").0[0] as usize;
+    let got = to_vec(tower.forward_mel(&mel, shape[0], shape[1], valid));
+    let (expected, _) = values(&source, "fixture.output");
+    assert_close(&got, &expected, 2e-4, "audio");
+}
 
-    for (record_index, (state, questions, ids)) in records.iter().enumerate() {
-        let layout = encode_record(
-            &tokenizer,
-            state,
-            None,
-            questions,
-            ids,
-            16384,
-            16384,
-            false,
-        )
-        .expect("encode");
-        let prefix = format!("record{record_index}");
-        let (want_ids, _) = values(&tensors, &format!("{prefix}.input_ids"));
-        let got_ids: Vec<f32> = layout.ids.iter().map(|id| *id as f32).collect();
-        assert_eq!(got_ids, want_ids, "{prefix} token ids");
-        for (question_index, question) in layout.questions.iter().enumerate() {
-            let (meta, _) = values(&tensors, &format!("{prefix}.q{question_index}.meta"));
-            assert_eq!(question.question_type, meta[0] as usize, "{prefix} type");
-            assert_eq!(
-                question.question_span,
-                span_of(&meta[1..3]),
-                "{prefix} q{question_index} span"
-            );
-            let (spans, spans_shape) =
-                values(&tensors, &format!("{prefix}.q{question_index}.option_spans"));
-            let want: Vec<(usize, usize)> = (0..spans_shape[0])
-                .map(|row| span_of(&spans[row * 2..row * 2 + 2]))
-                .collect();
-            assert_eq!(question.option_spans, want, "{prefix} q{question_index} options");
-        }
-    }
+#[test]
+fn resize_matches_torch_antialias() {
+    let source = fixture("resize_fixture.safetensors");
+    let (input, shape) = values(&source, "fixture.input");
+    let (expected, out_shape) = values(&source, "fixture.output");
+    let got = resize_hwc(
+        &input,
+        shape[0],
+        shape[1],
+        shape[2],
+        out_shape[0],
+        out_shape[1],
+    );
+    assert_close(&got, &expected, 1e-5, "resize");
+}
+
+#[test]
+fn vision_tower_matches_the_reference() {
+    let source = fixture("vision_fixture.safetensors");
+    let spec = VisionSpec {
+        hidden: 32,
+        intermediate: 48,
+        heads: 4,
+        layers: 1,
+        eps: 1e-6,
+        patch: 2,
+        num_patches: 16,
+        projector_hidden: 16,
+    };
+    let device = NdArrayDevice::default();
+    let tower = VisionTower::<B>::load(&source, &spec, &device).expect("vision");
+    let (patches, shape) = values(&source, "fixture.patches");
+    let spatial = values(&source, "fixture.spatial").0;
+    let got =
+        to_vec(tower.forward_crop(&patches, spatial[0] as usize, spatial[1] as usize, shape[1]));
+    let (expected, _) = values(&source, "fixture.output");
+    assert_close(&got, &expected, 2e-4, "vision");
+}
+
+#[test]
+fn safetensors_helper_reads_f32() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/resize_fixture.safetensors"),
+    )
+    .unwrap();
+    let tensors = SafeTensors::deserialize(&bytes).unwrap();
+    let view = tensors.tensor("fixture.output").unwrap();
+    assert!(!to_f32(&view).unwrap().is_empty());
 }

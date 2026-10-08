@@ -48,10 +48,7 @@ fn argmax(values: &[f32]) -> usize {
 }
 
 fn to_record(keys: &[String], values: &[f32]) -> BTreeMap<String, f32> {
-    keys.iter()
-        .cloned()
-        .zip(values.iter().copied())
-        .collect()
+    keys.iter().cloned().zip(values.iter().copied()).collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]

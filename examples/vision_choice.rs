@@ -5,7 +5,7 @@
 //! ```
 //!
 //! `rgb` is tightly packed RGB bytes. The snapshot is a local
-//! `Cloudflare/clef-flash` directory. This example does not download it.
+//! `LiquidAI/d1-omni-600M` directory. This example does not download it.
 
 use fuzzy_decision::{RgbImage, VisionDecision};
 
@@ -16,13 +16,22 @@ fn main() -> Result<(), fuzzy_decision::Error> {
     let width: u32 = args.next().expect("width").parse().expect("width");
     let height: u32 = args.next().expect("height").parse().expect("height");
     let data = std::fs::read(&rgb_path).unwrap_or_else(|err| panic!("read {rgb_path}: {err}"));
-    let image = RgbImage { width, height, data };
+    let image = RgbImage {
+        width,
+        height,
+        data,
+    };
     let decider = VisionDecision::load(dir)?;
     let answer = decider.choice(
         &image,
         "",
         "What is in the picture? Answer with one of the options.",
-        &["a red circle", "a blue square", "a green triangle", "nothing"],
+        &[
+            "a red circle",
+            "a blue square",
+            "a green triangle",
+            "nothing",
+        ],
     )?;
     println!("{}", answer.choice);
     for (label, probability) in &answer.probabilities {

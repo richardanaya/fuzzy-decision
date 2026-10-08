@@ -5,7 +5,7 @@
 //! separated by tabs.
 //!
 //! ```text
-//! cargo run --release --example image_eval -- models/clef-flash /tmp/clef-image-manifest.tsv
+//! cargo run --release --example image_eval -- models/d1-omni-600M /tmp/d1-image-manifest.tsv
 //! ```
 
 use std::collections::BTreeMap;
@@ -45,7 +45,10 @@ fn main() -> Result<(), fuzzy_decision::Error> {
     let manifest = args.next().expect("manifest");
     let text = fs::read_to_string(&manifest).unwrap_or_else(|err| panic!("read {manifest}: {err}"));
     let mut rows = Vec::new();
-    for line in text.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
+    for line in text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
         let mut parts = line.split('\t');
         let section = parts.next().expect("section").to_string();
         let question = parts.next().expect("question").to_string();
@@ -86,9 +89,7 @@ fn main() -> Result<(), fuzzy_decision::Error> {
         let ms = started.elapsed().as_millis();
         println!(
             "item\t{}\t{ms}\t{}\t{:.4}",
-            row.jpg,
-            answer.choice,
-            answer.confidence
+            row.jpg, answer.choice, answer.confidence
         );
         let probabilities = answer.probabilities.into_iter().collect();
         scored.push(Scored {
@@ -106,7 +107,10 @@ fn main() -> Result<(), fuzzy_decision::Error> {
 }
 
 fn write_html(scored: &[Scored], load_ms: u128) {
-    let hits = scored.iter().filter(|item| item.choice == item.row.gold).count();
+    let hits = scored
+        .iter()
+        .filter(|item| item.choice == item.row.gold)
+        .count();
     let n = scored.len();
     let total_ms: u128 = scored.iter().map(|item| item.ms).sum();
     let mut sections: BTreeMap<&str, Vec<&Scored>> = BTreeMap::new();
@@ -124,7 +128,10 @@ fn write_html(scored: &[Scored], load_ms: u128) {
     let mut body = String::new();
     for section in order {
         let items = &sections[section];
-        let section_hits = items.iter().filter(|item| item.choice == item.row.gold).count();
+        let section_hits = items
+            .iter()
+            .filter(|item| item.choice == item.row.gold)
+            .count();
         let mean = items.iter().map(|item| item.ms).sum::<u128>() / items.len() as u128;
         body.push_str(&format!(
             "<h2>{}</h2>\n<p>{} of {}. Mean time {:.1}s per picture, after the model was already loaded.</p>\n",
@@ -209,8 +216,8 @@ fn write_html(scored: &[Scored], load_ms: u128) {
 </head>
 <body>
   <header>
-    <p class="meta">fuzzy-decision &nbsp;·&nbsp; vision mode &nbsp;·&nbsp; Cloudflare/clef-flash &nbsp;·&nbsp; WGPU</p>
-    <h1>Clef-Flash on the picture set</h1>
+    <p class="meta">fuzzy-decision &nbsp;·&nbsp; vision mode &nbsp;·&nbsp; LiquidAI/d1-omni-600M &nbsp;·&nbsp; WGPU</p>
+    <h1>d1-omni-600M on the picture set</h1>
     <p class="figure">{hits} / {n}</p>
     <p>One forward scores every option. The percentage on a line is that option’s share of the list. Loading the checkpoint took {load:.1}s. Scoring itself was {score:.0}s across {n} questions.</p>
   </header>
