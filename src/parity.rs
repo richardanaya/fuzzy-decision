@@ -1,8 +1,7 @@
 //! Parity against fixtures generated from the d1 reference (`audio.py`,
 //! `encoder.py`, `vision.py`) with tiny or random weights.
 
-use burn::backend::ndarray::NdArrayDevice;
-use burn::backend::NdArray;
+use burn::tensor::Device;
 use safetensors::SafeTensors;
 
 use crate::conformer::AudioTower;
@@ -14,7 +13,6 @@ use crate::trunk::Trunk;
 use crate::vision::VisionTower;
 use crate::weights::{to_f32, AudioSpec, LayerKind, Snapshot, TensorSource, TrunkSpec, VisionSpec};
 
-type B = NdArray<f32>;
 
 fn fixture(name: &str) -> Snapshot {
     Snapshot::open(
@@ -67,8 +65,8 @@ fn trunk_matches_the_reference_forward() {
         ffn_multiplier: 1.0,
         rope_theta: 10_000.0,
     };
-    let device = NdArrayDevice::default();
-    let trunk = Trunk::<B>::load(&source, &spec, &device).expect("trunk");
+    let device = Device::ndarray();
+    let trunk = Trunk::load(&source, &spec, &device).expect("trunk");
     let (input, shape) = values(&source, "fixture.input");
     let hidden = tensor2(input, shape[0], shape[1], &device);
     let prefix = values(&source, "fixture.prefix").0[0] as usize;
@@ -80,8 +78,8 @@ fn trunk_matches_the_reference_forward() {
 #[test]
 fn head_matches_the_reference_logits() {
     let source = fixture("head_fixture.safetensors");
-    let device = NdArrayDevice::default();
-    let head = DecisionHead::<B>::load(&source, 64, 2, &device).expect("head");
+    let device = Device::ndarray();
+    let head = DecisionHead::load(&source, 64, 2, &device).expect("head");
     let (hidden, shape) = values(&source, "fixture.hidden");
     let markers: Vec<usize> = values(&source, "fixture.markers")
         .0
@@ -111,8 +109,8 @@ fn audio_tower_matches_the_reference() {
         kernel: 3,
         residual_width: 8,
     };
-    let device = NdArrayDevice::default();
-    let tower = AudioTower::<B>::load(&source, &spec, &device).expect("audio");
+    let device = Device::ndarray();
+    let tower = AudioTower::load(&source, &spec, &device).expect("audio");
     let (mel, shape) = values(&source, "fixture.mel");
     let valid = values(&source, "fixture.lengths").0[0] as usize;
     let got = to_vec(tower.forward_mel(&mel, shape[0], shape[1], valid));
@@ -149,8 +147,8 @@ fn vision_tower_matches_the_reference() {
         num_patches: 16,
         projector_hidden: 16,
     };
-    let device = NdArrayDevice::default();
-    let tower = VisionTower::<B>::load(&source, &spec, &device).expect("vision");
+    let device = Device::ndarray();
+    let tower = VisionTower::load(&source, &spec, &device).expect("vision");
     let (patches, shape) = values(&source, "fixture.patches");
     let spatial = values(&source, "fixture.spatial").0;
     let got =

@@ -1,28 +1,27 @@
 //! Two-layer pre-norm decision head. It adds a question-type embedding, runs
 //! the text positions through a ReLU transformer, and scores each marker.
 
-use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
+use burn::tensor::{Device, Tensor};
 
 use crate::nn::{attend, gelu_erf, load_tensor, relu_act, to_vec, LayerNorm, Linear};
 use crate::weights::TensorSource;
 
-pub struct DecisionHead<B: Backend> {
-    type_emb: Tensor<B, 2>,
-    layers: Vec<HeadLayer<B>>,
-    scorer_norm: LayerNorm<B>,
-    scorer_in: Linear<B>,
-    scorer_out: Linear<B>,
+pub struct DecisionHead {
+    type_emb: Tensor<2>,
+    layers: Vec<HeadLayer>,
+    scorer_norm: LayerNorm,
+    scorer_in: Linear,
+    scorer_out: Linear,
     heads: usize,
     head_dim: usize,
 }
 
-impl<B: Backend> DecisionHead<B> {
+impl DecisionHead {
     pub fn load(
         source: &impl TensorSource,
         hidden: usize,
         layers: usize,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         if !hidden.is_multiple_of(64) {
             return Err(format!(
@@ -49,7 +48,7 @@ impl<B: Backend> DecisionHead<B> {
         })
     }
 
-    pub fn logits(&self, hidden: Tensor<B, 2>, qtype: usize, markers: &[usize]) -> Vec<f32> {
+    pub fn logits(&self, hidden: Tensor<2>, qtype: usize, markers: &[usize]) -> Vec<f32> {
         let kind = self.type_emb.clone().narrow(0, qtype, 1);
         let mut hidden = hidden + kind;
         for layer in &self.layers {
@@ -67,30 +66,30 @@ impl<B: Backend> DecisionHead<B> {
     }
 }
 
-struct HeadLayer<B: Backend> {
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    out: Linear<B>,
-    fc1: Linear<B>,
-    fc2: Linear<B>,
-    norm1: LayerNorm<B>,
-    norm2: LayerNorm<B>,
+struct HeadLayer {
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    out: Linear,
+    fc1: Linear,
+    fc2: Linear,
+    norm1: LayerNorm,
+    norm2: LayerNorm,
 }
 
-impl<B: Backend> HeadLayer<B> {
+impl HeadLayer {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         hidden: usize,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
-        let weight: Tensor<B, 2> = load_tensor(
+        let weight: Tensor<2> = load_tensor(
             source,
             &format!("{prefix}.self_attn.in_proj_weight"),
             device,
         )?;
-        let bias: Tensor<B, 1> =
+        let bias: Tensor<1> =
             load_tensor(source, &format!("{prefix}.self_attn.in_proj_bias"), device)?;
         let (q, k, v) = split_qkv(weight, bias, hidden);
         Ok(Self {
@@ -110,7 +109,7 @@ impl<B: Backend> HeadLayer<B> {
         })
     }
 
-    fn forward(&self, hidden: Tensor<B, 2>, heads: usize, head_dim: usize) -> Tensor<B, 2> {
+    fn forward(&self, hidden: Tensor<2>, heads: usize, head_dim: usize) -> Tensor<2> {
         let attended = self.attention(self.norm1.forward(hidden.clone()), heads, head_dim);
         let hidden = hidden + attended;
         let fed = self.fc2.forward(relu_act(
@@ -119,7 +118,7 @@ impl<B: Backend> HeadLayer<B> {
         hidden + fed
     }
 
-    fn attention(&self, x: Tensor<B, 2>, heads: usize, head_dim: usize) -> Tensor<B, 2> {
+    fn attention(&self, x: Tensor<2>, heads: usize, head_dim: usize) -> Tensor<2> {
         let seq = x.dims()[0];
         let q = self
             .q
@@ -142,11 +141,11 @@ impl<B: Backend> HeadLayer<B> {
     }
 }
 
-fn split_qkv<B: Backend>(
-    weight: Tensor<B, 2>,
-    bias: Tensor<B, 1>,
+fn split_qkv(
+    weight: Tensor<2>,
+    bias: Tensor<1>,
     hidden: usize,
-) -> (Linear<B>, Linear<B>, Linear<B>) {
+) -> (Linear, Linear, Linear) {
     let parts = [(0, hidden), (hidden, hidden), (2 * hidden, hidden)];
     let linears = parts.map(|(start, len)| Linear {
         weight: weight.clone().narrow(0, start, len),
@@ -159,12 +158,12 @@ fn split_qkv<B: Backend>(
     )
 }
 
-trait CloneLinear<B: Backend> {
-    fn clone_linear(&self) -> Linear<B>;
+trait CloneLinear {
+    fn clone_linear(&self) -> Linear;
 }
 
-impl<B: Backend> CloneLinear<B> for Linear<B> {
-    fn clone_linear(&self) -> Linear<B> {
+impl CloneLinear for Linear {
+    fn clone_linear(&self) -> Linear {
         Linear {
             weight: self.weight.clone(),
             bias: self.bias.clone(),

@@ -3,8 +3,7 @@
 
 use std::path::Path;
 
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::tensor::backend::Backend;
+use burn::tensor::{Device, DeviceKind};
 use burn::tensor::Tensor;
 
 use crate::conformer::AudioTower;
@@ -24,20 +23,20 @@ pub enum Which {
     Vision,
 }
 
-pub struct Session<B: Backend> {
+pub struct Session {
     pub tokenizer: crate::tokenize::HfTokenizer,
-    trunk: Trunk<B>,
-    head: DecisionHead<B>,
+    trunk: Trunk,
+    head: DecisionHead,
     embed: EmbedTable,
-    audio: Option<AudioTower<B>>,
-    vision: Option<VisionTower<B>>,
+    audio: Option<AudioTower>,
+    vision: Option<VisionTower>,
     config: D1Config,
-    device: B::Device,
+    device: Device,
 }
 
 #[cfg(feature = "cpu")]
-impl Session<burn::backend::NdArray> {
-    pub(crate) fn load(dir: &Path, which: Which) -> Result<Self, Error> {
+impl Session {
+    pub(crate) fn load_cpu(dir: &Path, which: Which) -> Result<Self, Error> {
         for file in REQUIRED_FILES {
             if !dir.join(file).is_file() {
                 return Err(Error::MissingFile {
@@ -48,12 +47,12 @@ impl Session<burn::backend::NdArray> {
         }
         let config = D1Config::open(&dir.join("config.json"))
             .map_err(|message| Error::Weights { message })?;
-        let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+        let device = Device::ndarray();
         Self::open(dir, which, config, device)
     }
 }
 
-impl Session<Wgpu> {
+impl Session {
     pub fn load(dir: &Path, which: Which) -> Result<Self, Error> {
         // Missing files fail before a device exists, so a test with no
         // snapshot does not need a GPU.
@@ -67,13 +66,13 @@ impl Session<Wgpu> {
         }
         let config = D1Config::open(&dir.join("config.json"))
             .map_err(|message| Error::Weights { message })?;
-        let device = WgpuDevice::default();
+        let device = Device::wgpu(DeviceKind::DefaultDevice);
         Self::open(dir, which, config, device)
     }
 }
 
-impl<B: Backend> Session<B> {
-    fn open(dir: &Path, which: Which, config: D1Config, device: B::Device) -> Result<Self, Error> {
+impl Session {
+    fn open(dir: &Path, which: Which, config: D1Config, device: Device) -> Result<Self, Error> {
         let tokenizer = crate::tokenize::HfTokenizer::open(&dir.join("tokenizer.json"))
             .map_err(|message| Error::Weights { message })?;
         let snapshot = Snapshot::open(&dir.join("model.safetensors"))
@@ -141,7 +140,7 @@ impl<B: Backend> Session<B> {
         Ok(max_len)
     }
 
-    pub fn audio_prefix(&self, samples_16k: &[f32]) -> Result<Tensor<B, 2>, Error> {
+    pub fn audio_prefix(&self, samples_16k: &[f32]) -> Result<Tensor<2>, Error> {
         let tower = self.audio.as_ref().ok_or_else(|| Error::Audio {
             message: "this checkpoint was loaded without the audio tower".into(),
         })?;
@@ -150,7 +149,7 @@ impl<B: Backend> Session<B> {
         Ok(tower.forward_mel(&mel.features, mel.n_mels, mel.frames, mel.valid))
     }
 
-    pub fn vision_prefix(&self, image: &RgbImage) -> Result<Tensor<B, 2>, Error> {
+    pub fn vision_prefix(&self, image: &RgbImage) -> Result<Tensor<2>, Error> {
         let tower = self.vision.as_ref().ok_or_else(|| Error::Weights {
             message: "this checkpoint was loaded without the vision tower".into(),
         })?;
@@ -168,7 +167,7 @@ impl<B: Backend> Session<B> {
 
     pub fn question_logits(
         &self,
-        prefix: Option<&Tensor<B, 2>>,
+        prefix: Option<&Tensor<2>>,
         ids: &[u32],
         qtype: usize,
         markers: &[usize],

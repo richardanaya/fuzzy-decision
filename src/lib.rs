@@ -63,7 +63,6 @@ use prompt::{encode, kind_name, Modality};
 use questions::{validate_question, QuestionLimits};
 use vision::image_stamp;
 
-use burn::backend::wgpu::Wgpu;
 
 /// The only checkpoint [`FuzzyDecision::load`] accepts.
 pub const DEFAULT_MODEL: &str = "d1-omni-600M";
@@ -171,7 +170,7 @@ pub struct FuzzyDecision {
     max_state_tokens: usize,
     max_length: Option<usize>,
     truncation: Truncation,
-    session: Session<Wgpu>,
+    session: Session,
 }
 
 impl std::fmt::Debug for FuzzyDecision {
@@ -260,7 +259,7 @@ impl FuzzyDecision {
             .weights_dir
             .clone()
             .unwrap_or_else(weights::default_weights_dir);
-        let session = Session::<Wgpu>::load(&dir, Which::TextAudio)?;
+        let session = Session::load(&dir, Which::TextAudio)?;
         Ok(Self {
             limits: limits(),
             user_temperature: options.temperature,
@@ -527,7 +526,7 @@ impl FuzzyDecision {
         state: &str,
         question: Question,
         options: DecideOptions,
-        prefix: Option<Tensor<Wgpu, 2>>,
+        prefix: Option<Tensor<2>>,
         modality: Modality,
     ) -> Result<Answer, Error> {
         let mut answers = self.decide_mode(state, &[question], options, prefix, modality)?;
@@ -539,7 +538,7 @@ impl FuzzyDecision {
         state: &str,
         questions: &[Question],
         options: DecideOptions,
-        prefix: Option<Tensor<Wgpu, 2>>,
+        prefix: Option<Tensor<2>>,
         modality: Modality,
     ) -> Result<Vec<Answer>, Error> {
         for (index, question) in questions.iter().enumerate() {
@@ -553,7 +552,7 @@ impl FuzzyDecision {
         state: &str,
         questions: &[Question],
         options: &DecideOptions,
-        prefix: Option<Tensor<Wgpu, 2>>,
+        prefix: Option<Tensor<2>>,
         modality: Modality,
     ) -> Result<Vec<Answer>, Error> {
         if questions.is_empty() {
@@ -609,14 +608,14 @@ impl FuzzyDecision {
 
 struct CachedPrefix {
     stamp: u64,
-    prefix: Tensor<Wgpu, 2>,
+    prefix: Tensor<2>,
 }
 
 /// Image decisions. The vision tower output is reused when the same image is
 /// scored again. Each call is still one question, and it does not see other
 /// questions.
 pub struct VisionDecision {
-    session: Session<Wgpu>,
+    session: Session,
     prefix: RefCell<Option<CachedPrefix>>,
 }
 
@@ -624,7 +623,7 @@ impl VisionDecision {
     /// Load d1-omni-600M with its vision tower from `dir`.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
-            session: Session::<Wgpu>::load(dir.as_ref(), Which::Vision)?,
+            session: Session::load(dir.as_ref(), Which::Vision)?,
             prefix: RefCell::new(None),
         })
     }
@@ -721,7 +720,7 @@ impl VisionDecision {
         &self,
         state: &str,
         question: &Question,
-        prefix: &Tensor<Wgpu, 2>,
+        prefix: &Tensor<2>,
     ) -> Result<Vec<f32>, Error> {
         let max_len = self
             .session

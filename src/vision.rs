@@ -5,8 +5,7 @@
 //! twelve pre-norm layers, and a 2x2 pixel-unshuffle projector. Image resize
 //! rounds back to bytes, so a pixel can differ by one level from torchvision.
 
-use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
+use burn::tensor::{Device, Tensor};
 
 use crate::nn::{attend, gelu_erf, gelu_tanh, tensor2, LayerNorm, Linear};
 use crate::resample::{resize_hwc, resize_rgb_u8};
@@ -216,23 +215,23 @@ pub fn image_stamp(image: &RgbImage) -> u64 {
     hash
 }
 
-pub struct VisionTower<B: Backend> {
-    patch: Linear<B>,
+pub struct VisionTower {
+    patch: Linear,
     positions: Vec<f32>,
     grid: usize,
-    layers: Vec<VisionLayer<B>>,
-    post: LayerNorm<B>,
-    proj_1: Linear<B>,
-    proj_2: Linear<B>,
+    layers: Vec<VisionLayer>,
+    post: LayerNorm,
+    proj_1: Linear,
+    proj_2: Linear,
     hidden: usize,
-    device: B::Device,
+    device: Device,
 }
 
-impl<B: Backend> VisionTower<B> {
+impl VisionTower {
     pub fn load(
         source: &impl TensorSource,
         spec: &VisionSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let root = "vision.tower.vision_model";
         let (positions, shape) =
@@ -294,7 +293,7 @@ impl<B: Backend> VisionTower<B> {
         ph: usize,
         pw: usize,
         patch_dim: usize,
-    ) -> Tensor<B, 2> {
+    ) -> Tensor<2> {
         let n = ph * pw;
         let mut hidden = self
             .patch
@@ -308,7 +307,7 @@ impl<B: Backend> VisionTower<B> {
         self.project(hidden, ph, pw)
     }
 
-    fn project(&self, hidden: Tensor<B, 2>, ph: usize, pw: usize) -> Tensor<B, 2> {
+    fn project(&self, hidden: Tensor<2>, ph: usize, pw: usize) -> Tensor<2> {
         let f = 2;
         let channels = hidden.dims()[1];
         let x = hidden.reshape([ph, pw / f, channels * f]).swap_dims(0, 1);
@@ -320,25 +319,25 @@ impl<B: Backend> VisionTower<B> {
     }
 }
 
-struct VisionLayer<B: Backend> {
-    norm1: LayerNorm<B>,
-    norm2: LayerNorm<B>,
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    out: Linear<B>,
-    fc1: Linear<B>,
-    fc2: Linear<B>,
+struct VisionLayer {
+    norm1: LayerNorm,
+    norm2: LayerNorm,
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    out: Linear,
+    fc1: Linear,
+    fc2: Linear,
     heads: usize,
     head_dim: usize,
 }
 
-impl<B: Backend> VisionLayer<B> {
+impl VisionLayer {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         spec: &VisionSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         Ok(Self {
             norm1: LayerNorm::load(source, &format!("{prefix}.layer_norm1"), spec.eps, device)?,
@@ -369,7 +368,7 @@ impl<B: Backend> VisionLayer<B> {
         })
     }
 
-    fn forward(&self, hidden: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, hidden: Tensor<2>) -> Tensor<2> {
         let seq = hidden.dims()[0];
         let width = hidden.dims()[1];
         let normed = self.norm1.forward(hidden.clone());

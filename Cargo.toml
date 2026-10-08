@@ -36,7 +36,7 @@ name = "audio_eval"
 cpu = ["burn/ndarray"]
 
 [dependencies]
-burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu", "fusion"] }
+burn = { version = "=0.22.0-pre.2", default-features = false, features = ["std", "wgpu", "fusion"] }
 hound = "3.5"
 memmap2 = "0.9"
 realfft = "3"
@@ -46,4 +46,4 @@ thiserror = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
-burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu", "ndarray", "fusion"] }
+burn = { version = "=0.22.0-pre.2", default-features = false, features = ["std", "wgpu", "ndarray", "fusion"] }

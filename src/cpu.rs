@@ -6,7 +6,6 @@
 
 use std::path::Path;
 
-use burn::backend::NdArray;
 use burn::tensor::Tensor;
 
 use crate::answers::{decode_answer, Answer, ChoiceAnswer, NoulAnswer, ScoreAnswer};
@@ -26,14 +25,14 @@ pub struct CpuDecision {
     max_state_tokens: usize,
     max_length: Option<usize>,
     truncation: Truncation,
-    session: Session<NdArray>,
+    session: Session,
 }
 
 impl CpuDecision {
     /// Load the snapshot in `dir` onto the CPU. The directory needs
     /// `tokenizer.json`, `config.json`, and `model.safetensors`.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
-        let session = Session::<NdArray>::load(dir.as_ref(), Which::TextAudio)?;
+        let session = Session::load_cpu(dir.as_ref(), Which::TextAudio)?;
         Ok(Self {
             limits: limits(),
             user_temperature: None,
@@ -173,7 +172,7 @@ impl CpuDecision {
         state: &str,
         question: Question,
         options: DecideOptions,
-        prefix: Option<Tensor<NdArray, 2>>,
+        prefix: Option<Tensor<2>>,
         modality: Modality,
     ) -> Result<Answer, Error> {
         let mut answers = self.decide_mode(state, &[question], options, prefix, modality)?;
@@ -185,7 +184,7 @@ impl CpuDecision {
         state: &str,
         questions: &[Question],
         options: DecideOptions,
-        prefix: Option<Tensor<NdArray, 2>>,
+        prefix: Option<Tensor<2>>,
         modality: Modality,
     ) -> Result<Vec<Answer>, Error> {
         for (index, question) in questions.iter().enumerate() {

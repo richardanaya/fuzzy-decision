@@ -1,26 +1,25 @@
 //! LFM2.5 encoder trunk: short convolutions, grouped-query attention, SwiGLU.
 
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use crate::nn::{
     attend_prefix, load_tensor, repeat_kv, rotate_half, silu, tensor2, Linear, RmsNorm,
 };
 use crate::weights::{LayerKind, TensorSource, TrunkSpec};
 
-pub struct Trunk<B: Backend> {
-    layers: Vec<Block<B>>,
-    embedding_norm: RmsNorm<B>,
+pub struct Trunk {
+    layers: Vec<Block>,
+    embedding_norm: RmsNorm,
     head_dim: usize,
     rope_theta: f32,
-    device: B::Device,
+    device: Device,
 }
 
-impl<B: Backend> Trunk<B> {
+impl Trunk {
     pub fn load(
         source: &impl TensorSource,
         spec: &TrunkSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let mut layers = Vec::with_capacity(spec.layers.len());
         for (index, kind) in spec.layers.iter().enumerate() {
@@ -42,7 +41,7 @@ impl<B: Backend> Trunk<B> {
     }
 
     /// `hidden` is `(seq, dim)`. `prefix` is the media length; text-only calls pass 0.
-    pub fn forward(&self, hidden: Tensor<B, 2>, prefix: usize) -> Tensor<B, 2> {
+    pub fn forward(&self, hidden: Tensor<2>, prefix: usize) -> Tensor<2> {
         let seq = hidden.dims()[0];
         let (cos, sin) = rope_tables(seq, self.head_dim, self.rope_theta, &self.device);
         let mut hidden = hidden;
@@ -53,20 +52,20 @@ impl<B: Backend> Trunk<B> {
     }
 }
 
-struct Block<B: Backend> {
-    mixer: Mixer<B>,
-    ffn: Mlp<B>,
-    op_norm: RmsNorm<B>,
-    ffn_norm: RmsNorm<B>,
+struct Block {
+    mixer: Mixer,
+    ffn: Mlp,
+    op_norm: RmsNorm,
+    ffn_norm: RmsNorm,
 }
 
-impl<B: Backend> Block<B> {
+impl Block {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         spec: &TrunkSpec,
         kind: LayerKind,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let mixer = match kind {
             LayerKind::Conv => Mixer::Conv(ShortConv::load(
@@ -97,11 +96,11 @@ impl<B: Backend> Block<B> {
 
     fn forward(
         &self,
-        hidden: Tensor<B, 2>,
-        cos: &Tensor<B, 2>,
-        sin: &Tensor<B, 2>,
+        hidden: Tensor<2>,
+        cos: &Tensor<2>,
+        sin: &Tensor<2>,
         prefix: usize,
-    ) -> Tensor<B, 2> {
+    ) -> Tensor<2> {
         let mixed = match &self.mixer {
             Mixer::Conv(conv) => conv.forward(self.op_norm.forward_2d(hidden.clone()), prefix),
             Mixer::Attention(attn) => {
@@ -113,24 +112,24 @@ impl<B: Backend> Block<B> {
     }
 }
 
-enum Mixer<B: Backend> {
-    Conv(ShortConv<B>),
-    Attention(Attention<B>),
+enum Mixer {
+    Conv(ShortConv),
+    Attention(Attention),
 }
 
-struct ShortConv<B: Backend> {
-    in_proj: Linear<B>,
-    out_proj: Linear<B>,
-    weight: Tensor<B, 3>,
-    device: B::Device,
+struct ShortConv {
+    in_proj: Linear,
+    out_proj: Linear,
+    weight: Tensor<3>,
+    device: Device,
 }
 
-impl<B: Backend> ShortConv<B> {
+impl ShortConv {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         hidden: usize,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let _ = hidden;
         Ok(Self {
@@ -141,7 +140,7 @@ impl<B: Backend> ShortConv<B> {
         })
     }
 
-    fn forward(&self, x: Tensor<B, 2>, prefix: usize) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>, prefix: usize) -> Tensor<2> {
         let seq = x.dims()[0];
         let hidden = x.dims()[1];
         let mixed = self.in_proj.forward(x);
@@ -149,7 +148,7 @@ impl<B: Backend> ShortConv<B> {
         let c = mixed.clone().narrow(1, hidden, hidden);
         let u = mixed.narrow(1, 2 * hidden, hidden);
         let bx = (b * u).swap_dims(0, 1);
-        let pad = Tensor::<B, 2>::zeros([hidden, 1], &self.device);
+        let pad = Tensor::<2>::zeros([hidden, 1], &self.device);
         let xp = Tensor::cat(vec![pad.clone(), bx, pad], 1);
         let left = xp.clone().narrow(1, 0, seq);
         let mid = xp.clone().narrow(1, 1, seq);
@@ -164,24 +163,24 @@ impl<B: Backend> ShortConv<B> {
     }
 }
 
-struct Attention<B: Backend> {
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    out: Linear<B>,
-    q_norm: RmsNorm<B>,
-    k_norm: RmsNorm<B>,
+struct Attention {
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    out: Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     heads: usize,
     kv_heads: usize,
     head_dim: usize,
 }
 
-impl<B: Backend> Attention<B> {
+impl Attention {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         spec: &TrunkSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         Ok(Self {
             q: Linear::load(source, &format!("{prefix}.q_proj"), device, false)?,
@@ -198,11 +197,11 @@ impl<B: Backend> Attention<B> {
 
     fn forward(
         &self,
-        x: Tensor<B, 2>,
-        cos: &Tensor<B, 2>,
-        sin: &Tensor<B, 2>,
+        x: Tensor<2>,
+        cos: &Tensor<2>,
+        sin: &Tensor<2>,
         prefix: usize,
-    ) -> Tensor<B, 2> {
+    ) -> Tensor<2> {
         let seq = x.dims()[0];
         let q = self
             .q_norm
@@ -240,18 +239,18 @@ impl<B: Backend> Attention<B> {
     }
 }
 
-struct Mlp<B: Backend> {
-    w1: Linear<B>,
-    w2: Linear<B>,
-    w3: Linear<B>,
+struct Mlp {
+    w1: Linear,
+    w2: Linear,
+    w3: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
+impl Mlp {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         ffn: usize,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let w1 = Linear::load(source, &format!("{prefix}.w1"), device, false)?;
         if w1.weight.dims()[0] != ffn {
@@ -267,13 +266,13 @@ impl<B: Backend> Mlp<B> {
         })
     }
 
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.w2
             .forward(silu(self.w1.forward(x.clone())) * self.w3.forward(x))
     }
 }
 
-fn apply_rope<B: Backend>(x: Tensor<B, 3>, cos: &Tensor<B, 2>, sin: &Tensor<B, 2>) -> Tensor<B, 3> {
+fn apply_rope(x: Tensor<3>, cos: &Tensor<2>, sin: &Tensor<2>) -> Tensor<3> {
     let cos = cos.clone().unsqueeze_dim::<3>(0);
     let sin = sin.clone().unsqueeze_dim::<3>(0);
     x.clone() * cos + rotate_half(x) * sin
@@ -287,12 +286,12 @@ fn keep_right(seq: usize, prefix: usize) -> Vec<f32> {
     keep
 }
 
-fn rope_tables<B: Backend>(
+fn rope_tables(
     seq: usize,
     head_dim: usize,
     theta: f32,
-    device: &B::Device,
-) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    device: &Device,
+) -> (Tensor<2>, Tensor<2>) {
     let mut cos = vec![0.0f32; seq * head_dim];
     let mut sin = vec![0.0f32; seq * head_dim];
     let half = head_dim / 2;

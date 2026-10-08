@@ -1,8 +1,7 @@
 //! FastConformer audio tower: 8x conv subsampling, relative-position layers,
 //! then the adapter and residual that map features onto the trunk width.
 
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use crate::nn::{
     conv1d_bias, conv2d_bias, gelu_erf, load_tensor, relu_act, sigmoid, silu, softmax_dim, tensor2,
@@ -10,36 +9,36 @@ use crate::nn::{
 };
 use crate::weights::{AudioSpec, TensorSource};
 
-pub struct AudioTower<B: Backend> {
-    stem: [Conv2<B>; 5],
-    sub_out: Linear<B>,
-    layers: Vec<ConformerLayer<B>>,
-    adapter_norm: LayerNorm<B>,
-    adapter_1: Linear<B>,
-    adapter_2: Linear<B>,
-    residual_ln: LayerNorm<B>,
-    residual_down: Linear<B>,
-    residual_up: Linear<B>,
+pub struct AudioTower {
+    stem: [Conv2; 5],
+    sub_out: Linear,
+    layers: Vec<ConformerLayer>,
+    adapter_norm: LayerNorm,
+    adapter_1: Linear,
+    adapter_2: Linear,
+    residual_ln: LayerNorm,
+    residual_down: Linear,
+    residual_up: Linear,
     d_model: usize,
     heads: usize,
     feat_in: usize,
-    device: B::Device,
+    device: Device,
 }
 
-struct Conv2<B: Backend> {
-    weight: Tensor<B, 4>,
-    bias: Tensor<B, 1>,
+struct Conv2 {
+    weight: Tensor<4>,
+    bias: Tensor<1>,
     stride: usize,
     groups: usize,
 }
 
-impl<B: Backend> Conv2<B> {
+impl Conv2 {
     fn load(
         source: &impl TensorSource,
         index: usize,
         stride: usize,
         groups: usize,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         Ok(Self {
             weight: load_tensor(
@@ -57,7 +56,7 @@ impl<B: Backend> Conv2<B> {
         })
     }
 
-    fn apply(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+    fn apply(&self, x: Tensor<4>) -> Tensor<4> {
         let stride = [self.stride, self.stride];
         let padding = if self.stride == 1 && self.weight.dims()[2] == 1 {
             [0, 0]
@@ -75,11 +74,11 @@ impl<B: Backend> Conv2<B> {
     }
 }
 
-impl<B: Backend> AudioTower<B> {
+impl AudioTower {
     pub fn load(
         source: &impl TensorSource,
         spec: &AudioSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
         let mut layers = Vec::with_capacity(spec.layers);
         for index in 0..spec.layers {
@@ -130,7 +129,7 @@ impl<B: Backend> AudioTower<B> {
         n_mels: usize,
         frames: usize,
         valid: usize,
-    ) -> Tensor<B, 2> {
+    ) -> Tensor<2> {
         assert_eq!(n_mels, self.feat_in, "mel bins");
         let mut packed = vec![0.0f32; frames * n_mels];
         for frame in 0..frames {
@@ -138,7 +137,7 @@ impl<B: Backend> AudioTower<B> {
                 packed[frame * n_mels + bin] = mel[bin * frames + frame];
             }
         }
-        let input = Tensor::<B, 4>::from_data(
+        let input = Tensor::<4>::from_data(
             TensorData::new(packed, [1, 1, frames, n_mels]),
             &self.device,
         );
@@ -148,7 +147,7 @@ impl<B: Backend> AudioTower<B> {
         self.residual(self.adapter(hidden))
     }
 
-    fn pre_encode(&self, mut x: Tensor<B, 4>, mut length: usize) -> (Tensor<B, 2>, usize) {
+    fn pre_encode(&self, mut x: Tensor<4>, mut length: usize) -> (Tensor<2>, usize) {
         // Sequential: stride conv, ReLU, depthwise, pointwise, ReLU, depthwise, pointwise, ReLU.
         // The time mask is applied before every one of those modules.
         x = self.stem[0].apply(time_mask(x, length, &self.device));
@@ -176,7 +175,7 @@ impl<B: Backend> AudioTower<B> {
         (self.sub_out.forward(flat), length)
     }
 
-    fn conformer(&self, mut x: Tensor<B, 2>, length: usize) -> Tensor<B, 2> {
+    fn conformer(&self, mut x: Tensor<2>, length: usize) -> Tensor<2> {
         let time = x.dims()[0];
         let pos = tensor2(
             relative_positions(time, self.d_model),
@@ -190,13 +189,13 @@ impl<B: Backend> AudioTower<B> {
         x
     }
 
-    fn adapter(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn adapter(&self, x: Tensor<2>) -> Tensor<2> {
         self.adapter_2.forward(gelu_erf(
             self.adapter_1.forward(self.adapter_norm.forward(x)),
         ))
     }
 
-    fn residual(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn residual(&self, x: Tensor<2>) -> Tensor<2> {
         x.clone()
             + self.residual_up.forward(gelu_erf(
                 self.residual_down.forward(self.residual_ln.forward(x)),
@@ -208,7 +207,7 @@ fn stride_length(length: usize) -> usize {
     (length + 2 - 3) / 2 + 1
 }
 
-fn time_mask<B: Backend>(x: Tensor<B, 4>, length: usize, device: &B::Device) -> Tensor<B, 4> {
+fn time_mask(x: Tensor<4>, length: usize, device: &Device) -> Tensor<4> {
     let time = x.dims()[2];
     if length >= time {
         return x;
@@ -218,48 +217,48 @@ fn time_mask<B: Backend>(x: Tensor<B, 4>, length: usize, device: &B::Device) -> 
         *value = 1.0;
     }
     let mask =
-        Tensor::<B, 1>::from_data(TensorData::new(values, [time]), device).reshape([1, 1, time, 1]);
+        Tensor::<1>::from_data(TensorData::new(values, [time]), device).reshape([1, 1, time, 1]);
     x * mask
 }
 
-struct ConformerLayer<B: Backend> {
-    ff1_norm: LayerNorm<B>,
-    ff1_up: Linear<B>,
-    ff1_down: Linear<B>,
-    attn_norm: LayerNorm<B>,
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    out: Linear<B>,
-    pos: Linear<B>,
-    bias_u: Tensor<B, 2>,
-    bias_v: Tensor<B, 2>,
-    conv_norm: LayerNorm<B>,
-    pointwise1: Tensor<B, 3>,
-    pointwise1_bias: Tensor<B, 1>,
-    depthwise: Tensor<B, 3>,
-    depthwise_bias: Tensor<B, 1>,
-    bn_weight: Tensor<B, 1>,
-    bn_bias: Tensor<B, 1>,
-    bn_mean: Tensor<B, 1>,
-    bn_var: Tensor<B, 1>,
-    pointwise2: Tensor<B, 3>,
-    pointwise2_bias: Tensor<B, 1>,
+struct ConformerLayer {
+    ff1_norm: LayerNorm,
+    ff1_up: Linear,
+    ff1_down: Linear,
+    attn_norm: LayerNorm,
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    out: Linear,
+    pos: Linear,
+    bias_u: Tensor<2>,
+    bias_v: Tensor<2>,
+    conv_norm: LayerNorm,
+    pointwise1: Tensor<3>,
+    pointwise1_bias: Tensor<1>,
+    depthwise: Tensor<3>,
+    depthwise_bias: Tensor<1>,
+    bn_weight: Tensor<1>,
+    bn_bias: Tensor<1>,
+    bn_mean: Tensor<1>,
+    bn_var: Tensor<1>,
+    pointwise2: Tensor<3>,
+    pointwise2_bias: Tensor<1>,
     kernel: usize,
-    ff2_norm: LayerNorm<B>,
-    ff2_up: Linear<B>,
-    ff2_down: Linear<B>,
-    norm_out: LayerNorm<B>,
+    ff2_norm: LayerNorm,
+    ff2_up: Linear,
+    ff2_down: Linear,
+    norm_out: LayerNorm,
 }
 
-impl<B: Backend> ConformerLayer<B> {
+impl ConformerLayer {
     fn load(
         source: &impl TensorSource,
         prefix: &str,
         spec: &AudioSpec,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, String> {
-        let ff = |name: &str| -> Result<(Linear<B>, Linear<B>), String> {
+        let ff = |name: &str| -> Result<(Linear, Linear), String> {
             Ok((
                 Linear::load(source, &format!("{prefix}.{name}.linear1"), device, true)?,
                 Linear::load(source, &format!("{prefix}.{name}.linear2"), device, true)?,
@@ -374,12 +373,12 @@ impl<B: Backend> ConformerLayer<B> {
 
     fn forward(
         &self,
-        x: Tensor<B, 2>,
-        pos: &Tensor<B, 2>,
+        x: Tensor<2>,
+        pos: &Tensor<2>,
         length: usize,
         heads: usize,
-        device: &B::Device,
-    ) -> Tensor<B, 2> {
+        device: &Device,
+    ) -> Tensor<2> {
         let x = x.clone()
             + self.feed_forward(
                 self.ff1_norm.forward(x.clone()),
@@ -404,18 +403,18 @@ impl<B: Backend> ConformerLayer<B> {
         self.norm_out.forward(x)
     }
 
-    fn feed_forward(&self, x: Tensor<B, 2>, up: &Linear<B>, down: &Linear<B>) -> Tensor<B, 2> {
+    fn feed_forward(&self, x: Tensor<2>, up: &Linear, down: &Linear) -> Tensor<2> {
         down.forward(silu(up.forward(x)))
     }
 
     fn attention(
         &self,
-        x: Tensor<B, 2>,
-        pos: &Tensor<B, 2>,
+        x: Tensor<2>,
+        pos: &Tensor<2>,
         length: usize,
         heads: usize,
-        device: &B::Device,
-    ) -> Tensor<B, 2> {
+        device: &Device,
+    ) -> Tensor<2> {
         let time = x.dims()[0];
         let width = x.dims()[1];
         let dk = width / heads;
@@ -451,11 +450,11 @@ impl<B: Backend> ConformerLayer<B> {
         self.project(softmax_dim(scores, 2).matmul(v), time, width)
     }
 
-    fn project(&self, y: Tensor<B, 3>, time: usize, width: usize) -> Tensor<B, 2> {
+    fn project(&self, y: Tensor<3>, time: usize, width: usize) -> Tensor<2> {
         self.out.forward(y.swap_dims(0, 1).reshape([time, width]))
     }
 
-    fn conv(&self, x: Tensor<B, 2>, length: usize, device: &B::Device) -> Tensor<B, 2> {
+    fn conv(&self, x: Tensor<2>, length: usize, device: &Device) -> Tensor<2> {
         let time = x.dims()[0];
         let width = x.dims()[1];
         let y = conv1d_bias(
@@ -471,12 +470,12 @@ impl<B: Backend> ConformerLayer<B> {
         let b = y.narrow(0, width, width);
         let mut y = a * sigmoid(b);
         if length < time {
-            let zeros = Tensor::<B, 2>::zeros([width, time - length], device);
+            let zeros = Tensor::<2>::zeros([width, time - length], device);
             y = Tensor::cat(vec![y.narrow(1, 0, length), zeros], 1);
         }
         let pad = (self.kernel - 1) / 2;
         if pad > 0 {
-            let zeros = Tensor::<B, 2>::zeros([width, pad], device);
+            let zeros = Tensor::<2>::zeros([width, pad], device);
             y = Tensor::cat(vec![zeros.clone(), y, zeros], 1);
         }
         let y = conv1d_bias(
@@ -508,13 +507,13 @@ impl<B: Backend> ConformerLayer<B> {
     }
 }
 
-fn batch_norm<B: Backend>(
-    x: Tensor<B, 2>,
-    mean: &Tensor<B, 1>,
-    var: &Tensor<B, 1>,
-    weight: &Tensor<B, 1>,
-    bias: &Tensor<B, 1>,
-) -> Tensor<B, 2> {
+fn batch_norm(
+    x: Tensor<2>,
+    mean: &Tensor<1>,
+    var: &Tensor<1>,
+    weight: &Tensor<1>,
+    bias: &Tensor<1>,
+) -> Tensor<2> {
     let mean = mean.clone().unsqueeze_dim::<2>(1);
     let var = var.clone().unsqueeze_dim::<2>(1);
     let weight = weight.clone().unsqueeze_dim::<2>(1);
@@ -522,11 +521,11 @@ fn batch_norm<B: Backend>(
     (x - mean) / (var + 1e-5).sqrt() * weight + bias
 }
 
-fn rel_shift<B: Backend>(bd: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
+fn rel_shift(bd: Tensor<3>, device: &Device) -> Tensor<3> {
     let heads = bd.dims()[0];
     let qlen = bd.dims()[1];
     let pos = bd.dims()[2];
-    let zeros = Tensor::<B, 3>::zeros([heads, qlen, 1], device);
+    let zeros = Tensor::<3>::zeros([heads, qlen, 1], device);
     let padded = Tensor::cat(vec![zeros, bd], 2);
     padded
         .reshape([heads, pos + 1, qlen])
@@ -534,7 +533,7 @@ fn rel_shift<B: Backend>(bd: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
         .reshape([heads, qlen, pos])
 }
 
-fn invalid_mask<B: Backend>(time: usize, length: usize, device: &B::Device) -> Tensor<B, 3> {
+fn invalid_mask(time: usize, length: usize, device: &Device) -> Tensor<3> {
     let mut values = vec![0.0f32; time * time];
     for query in 0..time {
         for key in 0..time {
@@ -543,7 +542,7 @@ fn invalid_mask<B: Backend>(time: usize, length: usize, device: &B::Device) -> T
             }
         }
     }
-    Tensor::<B, 2>::from_data(TensorData::new(values, [time, time]), device).unsqueeze_dim::<3>(0)
+    Tensor::<2>::from_data(TensorData::new(values, [time, time]), device).unsqueeze_dim::<3>(0)
 }
 
 fn relative_positions(time: usize, d_model: usize) -> Vec<f32> {
