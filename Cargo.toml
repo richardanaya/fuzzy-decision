@@ -28,6 +28,9 @@ name = "image_eval"
 [[example]]
 name = "audio_decision"
 
+[[example]]
+name = "audio_eval"
+
 [features]
 # Host-side loader for machines without a GPU. The default API stays on WGPU.
 cpu = ["burn/ndarray"]

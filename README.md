@@ -17,9 +17,11 @@ fuzzy-decision = "0.6"
 
 A call needs a GPU that WGPU can see (Vulkan, Metal, or DX12). The checkpoint is one f32 `model.safetensors` of about 2.35 GB. The token embedding table (about 256 MB) stays on the CPU. The encoder plus the audio tower is about 1.8 GB of weights on the device, plus activations. `VisionDecision` loads the encoder and the SigLIP2 vision tower instead of the audio tower.
 
-## Weights
+## Get LiquidAI/d1-omni-600M
 
-Put a local `LiquidAI/d1-omni-600M` snapshot in one directory, then pass that directory to `FuzzyDecision::open`. `FuzzyDecision::load(LoadOptions::default())` looks for `models/d1-omni-600M` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
+The library never downloads weights. Fetch the public snapshot once, into one directory, before the first `open`. No Hugging Face token is required.
+
+`FuzzyDecision::open` takes that directory. `FuzzyDecision::load(LoadOptions::default())` looks for `models/d1-omni-600M` relative to the process working directory. A missing file returns `Error::MissingFile` with the directory and the file name.
 
 | File in that directory | Purpose |
 | --- | --- |
@@ -27,20 +29,20 @@ Put a local `LiquidAI/d1-omni-600M` snapshot in one directory, then pass that di
 | `config.json` | architecture and text temperatures |
 | `model.safetensors` | encoder, decision head, audio tower, and vision tower (f32) |
 
-Fetch them from the application that embeds this library, once, before the first `open`. The library never calls the network.
+From the directory where you will run the program:
 
 ```bash
 DIR=models/d1-omni-600M
 mkdir -p "$DIR"
 for f in tokenizer.json config.json model.safetensors; do
-  curl -L --fail -o "$DIR/$f" \
+  curl -L --fail --retry 3 -o "$DIR/$f" \
     "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/main/$f"
 done
 ```
 
-No token is required; the repository is public. If you mirror it behind authentication, pass your own token to `curl` (for example `-H "Authorization: Bearer $HF_TOKEN"`) — this crate never reads one.
+`model.safetensors` is about 2.2 GB. `tokenizer.json` is about 4.6 MB and `config.json` is a few kilobytes. All three must sit in `$DIR`. Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or set `LoadOptions { weights_dir: Some(path), .. }`. Do not commit the files.
 
-Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or set `LoadOptions { weights_dir: Some(path), .. }`. Do not commit the files.
+If you mirror the repository behind authentication, pass your own token to `curl` (for example `-H "Authorization: Bearer $HF_TOKEN"`). This crate never reads a token and never calls the network.
 
 Only `d1-omni-600M` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`.
 
@@ -196,7 +198,7 @@ Images follow the reference layout: sides snap with a factor of 32, a tile is 51
 
 ## Evals
 
-`cargo run --release --example domain_eval` loads `models/d1-omni-600M` and scores 1000 professional and everyday classification questions across 21 domains, then writes the report to `text_eval.html`. `cargo run --release --example vision_suite`, `vision_judge`, and `image_eval` score packed RGB images from a manifest. `cargo run --release --example audio_decision` scores one WAV. The examples do not download weights.
+`cargo run --release --example domain_eval` loads `models/d1-omni-600M` and scores 1000 professional and everyday classification questions across 21 domains, then writes the report to `text_eval.html`. `cargo run --release --example vision_suite`, `vision_judge`, and `image_eval` score packed RGB images from a manifest. `cargo run --release --example audio_decision` scores one WAV. `cargo run --release --example audio_eval` scores a fixed clip set and writes `audio_eval.html`. The examples do not download weights.
 
 ## Limits
 
@@ -280,7 +282,7 @@ Text that contains a delimiter spelling such as `<|reserved_7|>` is escaped befo
 
 ## Breaking changes from 0.5
 
-- The checkpoint moved from `Cloudflare/clef-flash` to `LiquidAI/d1-omni-600M`. `DEFAULT_MODEL` is `"d1-omni-600M"` and `MODEL_REPO` is `"LiquidAI/d1-omni-600M"`.
+- The checkpoint is `LiquidAI/d1-omni-600M`. `DEFAULT_MODEL` is `"d1-omni-600M"` and `MODEL_REPO` is `"LiquidAI/d1-omni-600M"`.
 - The default weights directory is `models/d1-omni-600M`. The snapshot is `tokenizer.json`, `config.json`, and one f32 `model.safetensors`.
 - Each question is its own forward pass. Questions in one `decide` call do not influence each other. `decide_map` keys are not part of the prompt.
 - Choice requires at least 2 options. Score allows at most 10 levels.

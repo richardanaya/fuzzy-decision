@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fuzzy-decision audio eval</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Georgia, "Iowan Old Style", serif; max-width: 58rem; margin: 2.5rem auto 4rem; padding: 0 1.4rem; color: #1c1a17; background: #f6f3ed; line-height: 1.5; }
+    header { border-bottom: 1px solid #d9d0c3; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+    h1 { font-size: 1.9rem; font-weight: 600; margin: 0 0 0.3rem; }
+    h2 { font-size: 1.25rem; margin: 2rem 0 0.6rem; }
+    p { margin: 0.45rem 0; }
+    .meta { color: #5c564c; }
+    .figure { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 2.4rem; font-weight: 600; letter-spacing: -0.03em; margin: 0.2rem 0; }
+    article { display: grid; grid-template-columns: 220px 1fr; gap: 1rem; background: #fff; border: 1px solid #e4ddd2; padding: 0.8rem; margin: 0.8rem 0; }
+    .clip audio { width: 220px; }
+    .name { font-family: ui-sans-serif, system-ui, sans-serif; font-weight: 650; margin-top: 0; }
+    .q { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.95rem; }
+    .hit { color: #1d6b3a; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .miss { color: #9a3412; font-weight: 600; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .exp { color: #5c564c; font-size: 0.95rem; }
+    .opt { margin: 0.28rem 0; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.82rem; }
+    .opt .lab { display: flex; justify-content: space-between; gap: 1rem; }
+    .opt.chosen .lab span:first-child { font-weight: 650; }
+    .bar { height: 0.45rem; background: #efe8dc; border-radius: 99px; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: #2f5d50; }
+    .opt.chosen .bar > span { background: #1d6b3a; }
+    @media (max-width: 640px) {
+      article { grid-template-columns: 1fr; }
+      .clip audio { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="meta">fuzzy-decision &nbsp;·&nbsp; audio mode &nbsp;·&nbsp; LiquidAI/d1-omni-600M &nbsp;·&nbsp; WGPU</p>
+    <h1>d1-omni-600M on a small clip set</h1>
+    <p class="figure">9 / 12</p>
+    <p>Each clip is the whole input. The state string is <code>{}</code>, which is what the audio questions were trained with in that case. One forward scores every option. The percentage on a line is that option’s share of the list. Loading the checkpoint took 1.4s. Scoring itself was 2s across 12 questions.</p>
+  </header>
+  <h2>Kind of sound</h2>
+<p>4 of 7. Mean time 0.2s per clip, after the model was already loaded.</p>
+<article>
+  <div class="clip">
+    <p class="name">silence</p>
+    <audio controls src="audio_eval/silence.wav"></audio>
+    <p class="exp">One second of zeros.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="hit">hit · 0.3s · 88.7% on “silence”</p>
+    <p class="exp">Labeled answer: silence</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>3.3%</span></div><div class="bar"><span style="width:3.3%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>2.3%</span></div><div class="bar"><span style="width:2.3%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>5.7%</span></div><div class="bar"><span style="width:5.7%"></span></div></div><div class="opt chosen"><div class="lab"><span>silence</span><span>88.7%</span></div><div class="bar"><span style="width:88.7%"></span></div></div><div class="opt"><div class="lab"><span>speech</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">fixture silence</p>
+    <audio controls src="audio_eval/fixture-silence.wav"></audio>
+    <p class="exp">tests/data/silence.wav, one second.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="hit">hit · 0.2s · 88.7% on “silence”</p>
+    <p class="exp">Labeled answer: silence</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>3.3%</span></div><div class="bar"><span style="width:3.3%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>2.3%</span></div><div class="bar"><span style="width:2.3%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>5.7%</span></div><div class="bar"><span style="width:5.7%"></span></div></div><div class="opt chosen"><div class="lab"><span>silence</span><span>88.7%</span></div><div class="bar"><span style="width:88.7%"></span></div></div><div class="opt"><div class="lab"><span>speech</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">noise</p>
+    <audio controls src="audio_eval/noise.wav"></audio>
+    <p class="exp">One second of uniform noise at amplitude 0.25.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="miss">miss · 0.2s · 73.7% on “silence”</p>
+    <p class="exp">Labeled answer: noise</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>9.5%</span></div><div class="bar"><span style="width:9.5%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>7.5%</span></div><div class="bar"><span style="width:7.5%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>9.2%</span></div><div class="bar"><span style="width:9.2%"></span></div></div><div class="opt chosen"><div class="lab"><span>silence</span><span>73.7%</span></div><div class="bar"><span style="width:73.7%"></span></div></div><div class="opt"><div class="lab"><span>speech</span><span>0.1%</span></div><div class="bar"><span style="width:0.1%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">pure tone</p>
+    <audio controls src="audio_eval/tone.wav"></audio>
+    <p class="exp">One second of a 440 Hz sine at amplitude 0.25.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="miss">miss · 0.2s · 71.0% on “silence”</p>
+    <p class="exp">Labeled answer: a pure tone</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>12.7%</span></div><div class="bar"><span style="width:12.7%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>8.1%</span></div><div class="bar"><span style="width:8.1%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>8.0%</span></div><div class="bar"><span style="width:8.0%"></span></div></div><div class="opt chosen"><div class="lab"><span>silence</span><span>71.0%</span></div><div class="bar"><span style="width:71.0%"></span></div></div><div class="opt"><div class="lab"><span>speech</span><span>0.1%</span></div><div class="bar"><span style="width:0.1%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">chord</p>
+    <audio controls src="audio_eval/chord.wav"></audio>
+    <p class="exp">1.5 seconds of C4, E4, and G4 added together.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="miss">miss · 0.2s · 89.4% on “silence”</p>
+    <p class="exp">Labeled answer: music</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>2.4%</span></div><div class="bar"><span style="width:2.4%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>2.7%</span></div><div class="bar"><span style="width:2.7%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>5.4%</span></div><div class="bar"><span style="width:5.4%"></span></div></div><div class="opt chosen"><div class="lab"><span>silence</span><span>89.4%</span></div><div class="bar"><span style="width:89.4%"></span></div></div><div class="opt"><div class="lab"><span>speech</span><span>0.1%</span></div><div class="bar"><span style="width:0.1%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">speech</p>
+    <audio controls src="audio_eval/speech.wav"></audio>
+    <p class="exp">tests/data/speech.wav, about half a second.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="hit">hit · 0.2s · 99.9% on “speech”</p>
+    <p class="exp">Labeled answer: speech</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div><div class="opt"><div class="lab"><span>silence</span><span>0.0%</span></div><div class="bar"><span style="width:0.0%"></span></div></div><div class="opt chosen"><div class="lab"><span>speech</span><span>99.9%</span></div><div class="bar"><span style="width:99.9%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">speech plus noise</p>
+    <audio controls src="audio_eval/speech-plus-noise.wav"></audio>
+    <p class="exp">The speech fixture with a quieter noise layer added.</p>
+  </div>
+  <div>
+    <p class="q">What is in this clip?</p>
+    <p class="hit">hit · 0.2s · 99.4% on “speech”</p>
+    <p class="exp">Labeled answer: speech</p>
+    <div class="opt"><div class="lab"><span>a pure tone</span><span>0.1%</span></div><div class="bar"><span style="width:0.1%"></span></div></div><div class="opt"><div class="lab"><span>music</span><span>0.2%</span></div><div class="bar"><span style="width:0.2%"></span></div></div><div class="opt"><div class="lab"><span>noise</span><span>0.1%</span></div><div class="bar"><span style="width:0.1%"></span></div></div><div class="opt"><div class="lab"><span>silence</span><span>0.2%</span></div><div class="bar"><span style="width:0.2%"></span></div></div><div class="opt chosen"><div class="lab"><span>speech</span><span>99.4%</span></div><div class="bar"><span style="width:99.4%"></span></div></div>
+  </div>
+</article>
+<h2>Is anyone speaking?</h2>
+<p>5 of 5. Mean time 0.2s per clip, after the model was already loaded.</p>
+<article>
+  <div class="clip">
+    <p class="name">silence</p>
+    <audio controls src="audio_eval/silence.wav"></audio>
+    <p class="exp">One second of zeros.</p>
+  </div>
+  <div>
+    <p class="q">Does this clip contain speech?</p>
+    <p class="hit">hit · 0.2s · 67.3% on “no”</p>
+    <p class="exp">Labeled answer: no</p>
+    <div class="opt chosen"><div class="lab"><span>no</span><span>67.3%</span></div><div class="bar"><span style="width:67.3%"></span></div></div><div class="opt"><div class="lab"><span>yes</span><span>32.7%</span></div><div class="bar"><span style="width:32.7%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">noise</p>
+    <audio controls src="audio_eval/noise.wav"></audio>
+    <p class="exp">One second of uniform noise.</p>
+  </div>
+  <div>
+    <p class="q">Does this clip contain speech?</p>
+    <p class="hit">hit · 0.2s · 67.2% on “no”</p>
+    <p class="exp">Labeled answer: no</p>
+    <div class="opt chosen"><div class="lab"><span>no</span><span>67.2%</span></div><div class="bar"><span style="width:67.2%"></span></div></div><div class="opt"><div class="lab"><span>yes</span><span>32.8%</span></div><div class="bar"><span style="width:32.8%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">chord</p>
+    <audio controls src="audio_eval/chord.wav"></audio>
+    <p class="exp">The three-note chord.</p>
+  </div>
+  <div>
+    <p class="q">Does this clip contain speech?</p>
+    <p class="hit">hit · 0.2s · 73.4% on “no”</p>
+    <p class="exp">Labeled answer: no</p>
+    <div class="opt chosen"><div class="lab"><span>no</span><span>73.4%</span></div><div class="bar"><span style="width:73.4%"></span></div></div><div class="opt"><div class="lab"><span>yes</span><span>26.6%</span></div><div class="bar"><span style="width:26.6%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">speech</p>
+    <audio controls src="audio_eval/speech.wav"></audio>
+    <p class="exp">tests/data/speech.wav.</p>
+  </div>
+  <div>
+    <p class="q">Does this clip contain speech?</p>
+    <p class="hit">hit · 0.2s · 99.8% on “yes”</p>
+    <p class="exp">Labeled answer: yes</p>
+    <div class="opt"><div class="lab"><span>no</span><span>0.2%</span></div><div class="bar"><span style="width:0.2%"></span></div></div><div class="opt chosen"><div class="lab"><span>yes</span><span>99.8%</span></div><div class="bar"><span style="width:99.8%"></span></div></div>
+  </div>
+</article>
+<article>
+  <div class="clip">
+    <p class="name">speech plus noise</p>
+    <audio controls src="audio_eval/speech-plus-noise.wav"></audio>
+    <p class="exp">Speech with a quieter noise layer.</p>
+  </div>
+  <div>
+    <p class="q">Does this clip contain speech?</p>
+    <p class="hit">hit · 0.2s · 99.3% on “yes”</p>
+    <p class="exp">Labeled answer: yes</p>
+    <div class="opt"><div class="lab"><span>no</span><span>0.7%</span></div><div class="bar"><span style="width:0.7%"></span></div></div><div class="opt chosen"><div class="lab"><span>yes</span><span>99.3%</span></div><div class="bar"><span style="width:99.3%"></span></div></div>
+  </div>
+</article>
+
+</body>
+</html>

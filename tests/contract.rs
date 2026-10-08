@@ -24,13 +24,13 @@ fn info_names_the_repo_and_the_directory() {
 #[test]
 fn other_model_names_are_rejected() {
     let err = FuzzyDecision::load(LoadOptions {
-        model: "clef-flash".into(),
+        model: "other-model".into(),
         ..LoadOptions::default()
     })
     .unwrap_err();
     let message = err.to_string();
     assert!(message.contains("d1-omni-600M"), "{message}");
-    assert!(message.contains("clef-flash"), "{message}");
+    assert!(message.contains("other-model"), "{message}");
 }
 
 #[test]
