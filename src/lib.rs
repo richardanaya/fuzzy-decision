@@ -15,6 +15,8 @@
 
 mod answers;
 mod conformer;
+#[cfg(feature = "cpu")]
+mod cpu;
 mod head;
 mod mel;
 mod model;
@@ -31,6 +33,8 @@ mod wav;
 mod weights;
 
 pub use answers::{Answer, ChoiceAnswer, NoulAnswer, ScoreAnswer};
+#[cfg(feature = "cpu")]
+pub use cpu::CpuDecision;
 pub use questions::{choice, noul, score, Question, Truncation};
 pub use vision::{RgbImage, TILE};
 pub use wav::AudioClip;
@@ -256,7 +260,7 @@ impl FuzzyDecision {
             .weights_dir
             .clone()
             .unwrap_or_else(weights::default_weights_dir);
-        let session = Session::load(&dir, Which::TextAudio)?;
+        let session = Session::<Wgpu>::load(&dir, Which::TextAudio)?;
         Ok(Self {
             limits: limits(),
             user_temperature: options.temperature,
@@ -620,7 +624,7 @@ impl VisionDecision {
     /// Load d1-omni-600M with its vision tower from `dir`.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
-            session: Session::load(dir.as_ref(), Which::Vision)?,
+            session: Session::<Wgpu>::load(dir.as_ref(), Which::Vision)?,
             prefix: RefCell::new(None),
         })
     }
@@ -736,7 +740,7 @@ impl VisionDecision {
     }
 }
 
-fn check_temperature(temperature: f32) -> Result<(), Error> {
+pub(crate) fn check_temperature(temperature: f32) -> Result<(), Error> {
     if temperature.is_finite() && temperature > 0.0 {
         Ok(())
     } else {

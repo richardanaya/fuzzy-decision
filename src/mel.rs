@@ -75,17 +75,22 @@ pub fn log_mel(wave: &[f32]) -> LogMel {
     }
     let count = valid as f32;
     for bin in 0..N_MELS {
-        let mut sum = 0.0f32;
+        // PyTorch's CPU sum accumulates in 16-wide lanes. A sequential sum
+        // disagrees in the last bits, and a silent clip (every bin equal)
+        // turns that into an O(1) difference after dividing by a tiny std.
+        let mut samples = Vec::with_capacity(valid);
         for frame_index in 0..valid {
-            sum += mel[bin * stft_frames + frame_index];
+            samples.push(mel[bin * stft_frames + frame_index]);
         }
-        let mean = sum / count;
-        let mut var = 0.0f32;
-        for frame_index in 0..valid {
-            let delta = mel[bin * stft_frames + frame_index] - mean;
-            var += delta * delta;
-        }
-        let mut std = (var / (count - 1.0)).sqrt();
+        let mean = torch_sum(&samples) / count;
+        let squares: Vec<f32> = samples
+            .into_iter()
+            .map(|sample| {
+                let delta = sample - mean;
+                delta * delta
+            })
+            .collect();
+        let mut std = (torch_sum(&squares) / (count - 1.0)).sqrt();
         if !std.is_finite() {
             std = 0.0;
         }
@@ -105,6 +110,27 @@ pub fn log_mel(wave: &[f32]) -> LogMel {
         frames: stft_frames,
         valid,
     }
+}
+
+/// Sum the way PyTorch's CPU kernel does: 16-wide lanes, then a scalar tail.
+fn torch_sum(values: &[f32]) -> f32 {
+    const WIDTH: usize = 16;
+    let mut lanes = [0.0f32; WIDTH];
+    let blocks = values.len() / WIDTH;
+    for block in 0..blocks {
+        let base = block * WIDTH;
+        for lane in 0..WIDTH {
+            lanes[lane] += values[base + lane];
+        }
+    }
+    let mut acc = 0.0f32;
+    for lane in lanes {
+        acc += lane;
+    }
+    for value in &values[blocks * WIDTH..] {
+        acc += *value;
+    }
+    acc
 }
 
 fn hann() -> &'static [f32] {

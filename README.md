@@ -44,6 +44,8 @@ Then `FuzzyDecision::open(DIR)`. Keep the directory next to the application, or 
 
 Only `d1-omni-600M` loads. Any other `LoadOptions.model` returns `Error::UnsupportedModel`.
 
+The `cpu` feature loads that same snapshot with [`CpuDecision`] on Burn's NdArray backend, for a machine without a GPU. The default API stays on WGPU. `CpuDecision` keeps the checkpoint in host memory.
+
 ## One question
 
 ```rust

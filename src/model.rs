@@ -35,6 +35,24 @@ pub struct Session<B: Backend> {
     device: B::Device,
 }
 
+#[cfg(feature = "cpu")]
+impl Session<burn::backend::NdArray> {
+    pub(crate) fn load(dir: &Path, which: Which) -> Result<Self, Error> {
+        for file in REQUIRED_FILES {
+            if !dir.join(file).is_file() {
+                return Err(Error::MissingFile {
+                    dir: dir.to_path_buf(),
+                    file,
+                });
+            }
+        }
+        let config = D1Config::open(&dir.join("config.json"))
+            .map_err(|message| Error::Weights { message })?;
+        let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+        Self::open(dir, which, config, device)
+    }
+}
+
 impl Session<Wgpu> {
     pub fn load(dir: &Path, which: Which) -> Result<Self, Error> {
         // Missing files fail before a device exists, so a test with no
