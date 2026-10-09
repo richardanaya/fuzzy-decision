@@ -82,13 +82,7 @@ fn write_wav(path: &str, samples: &[f32]) {
 }
 
 fn items() -> Vec<Item> {
-    let kind = &[
-        "speech",
-        "music",
-        "noise",
-        "silence",
-        "a pure tone",
-    ][..];
+    let kind = &["speech", "music", "noise", "silence", "a pure tone"][..];
     let yes_no = &["yes", "no"][..];
 
     let silence = vec![0.0; 16_000];
@@ -97,10 +91,9 @@ fn items() -> Vec<Item> {
     let chord: Vec<f32> = (0..(16_000 * 3 / 2))
         .map(|i| {
             let t = i as f32 / 16_000.0;
-            0.15
-                * ((2.0 * PI * 261.63 * t).sin()
-                    + (2.0 * PI * 329.63 * t).sin()
-                    + (2.0 * PI * 392.00 * t).sin())
+            0.15 * ((2.0 * PI * 261.63 * t).sin()
+                + (2.0 * PI * 329.63 * t).sin()
+                + (2.0 * PI * 392.00 * t).sin())
         })
         .collect();
     let speech = AudioClip::from_wav("tests/data/speech.wav").expect("speech fixture");
@@ -226,10 +219,9 @@ fn items() -> Vec<Item> {
                 (0..(16_000 * 3 / 2))
                     .map(|i| {
                         let t = i as f32 / 16_000.0;
-                        0.15
-                            * ((2.0 * PI * 261.63 * t).sin()
-                                + (2.0 * PI * 329.63 * t).sin()
-                                + (2.0 * PI * 392.00 * t).sin())
+                        0.15 * ((2.0 * PI * 261.63 * t).sin()
+                            + (2.0 * PI * 329.63 * t).sin()
+                            + (2.0 * PI * 392.00 * t).sin())
                     })
                     .collect(),
             ),
