@@ -42,8 +42,8 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn open(path: &Path) -> Result<Self, String> {
         let file = File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
-        let map = unsafe { Mmap::map(&file) }
-            .map_err(|err| format!("mmap {}: {err}", path.display()))?;
+        let map =
+            unsafe { Mmap::map(&file) }.map_err(|err| format!("mmap {}: {err}", path.display()))?;
         let parsed = SafeTensors::deserialize(&map)
             .map_err(|err| format!("safetensors {}: {err}", path.display()))?;
         let base = map.as_ptr() as usize;
@@ -72,17 +72,23 @@ fn to_f32(view: &TensorView<'_>) -> Result<Vec<f32>, String> {
     let bytes = view.data();
     match view.dtype() {
         Dtype::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect()),
         Dtype::BF16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk))
             .map(|half| f32::from_bits((half as u32) << 16))
             .collect()),
         Dtype::F16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk))
             .map(half_to_f32)
             .collect()),
         other => Err(format!("unsupported dtype {other:?}")),

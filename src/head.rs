@@ -141,11 +141,7 @@ impl HeadLayer {
     }
 }
 
-fn split_qkv(
-    weight: Tensor<2>,
-    bias: Tensor<1>,
-    hidden: usize,
-) -> (Linear, Linear, Linear) {
+fn split_qkv(weight: Tensor<2>, bias: Tensor<1>, hidden: usize) -> (Linear, Linear, Linear) {
     let parts = [(0, hidden), (hidden, hidden), (2 * hidden, hidden)];
     let linears = parts.map(|(start, len)| Linear {
         weight: weight.clone().narrow(0, start, len),

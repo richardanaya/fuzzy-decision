@@ -1,6 +1,6 @@
 # fuzzy-decision
 
-`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text, audio, and image questions use [LiquidAI/d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M). The forward pass runs on [Burn](https://burn.dev) 0.22.0-pre.2 with the WGPU backend. This crate reads weights from a directory you pass. It does not download them.
+`fuzzy-decision` scores questions you write. Each answer is a probability over the options you supplied. The model does not write new text. Text, audio, and image questions use [LiquidAI/d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M). The forward pass runs on [Burn](https://burn.dev) 0.22.0 with the WGPU backend. This crate reads weights from a directory you pass. It does not download them.
 
 The crate is MIT. The checkpoint is separate and uses the [LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-omni-600M). That license restricts commercial use to entities under $10M annual revenue.
 

@@ -63,7 +63,6 @@ use prompt::{encode, kind_name, Modality};
 use questions::{validate_question, QuestionLimits};
 use vision::image_stamp;
 
-
 /// The only checkpoint [`FuzzyDecision::load`] accepts.
 pub const DEFAULT_MODEL: &str = "d1-omni-600M";
 

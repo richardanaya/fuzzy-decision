@@ -68,18 +68,18 @@ impl Block {
         device: &Device,
     ) -> Result<Self, String> {
         let mixer = match kind {
-            LayerKind::Conv => Mixer::Conv(ShortConv::load(
+            LayerKind::Conv => Mixer::Conv(Box::new(ShortConv::load(
                 source,
                 &format!("{prefix}.conv"),
                 spec.hidden,
                 device,
-            )?),
-            LayerKind::Attention => Mixer::Attention(Attention::load(
+            )?)),
+            LayerKind::Attention => Mixer::Attention(Box::new(Attention::load(
                 source,
                 &format!("{prefix}.self_attn"),
                 spec,
                 device,
-            )?),
+            )?)),
         };
         Ok(Self {
             mixer,
@@ -113,8 +113,10 @@ impl Block {
 }
 
 enum Mixer {
-    Conv(ShortConv),
-    Attention(Attention),
+    // Burn 0.22 tensors carry their device, so an unboxed mixer is several
+    // kilobytes and the two variants differ by more than Clippy allows.
+    Conv(Box<ShortConv>),
+    Attention(Box<Attention>),
 }
 
 struct ShortConv {
@@ -195,13 +197,7 @@ impl Attention {
         })
     }
 
-    fn forward(
-        &self,
-        x: Tensor<2>,
-        cos: &Tensor<2>,
-        sin: &Tensor<2>,
-        prefix: usize,
-    ) -> Tensor<2> {
+    fn forward(&self, x: Tensor<2>, cos: &Tensor<2>, sin: &Tensor<2>, prefix: usize) -> Tensor<2> {
         let seq = x.dims()[0];
         let q = self
             .q_norm
@@ -286,12 +282,7 @@ fn keep_right(seq: usize, prefix: usize) -> Vec<f32> {
     keep
 }
 
-fn rope_tables(
-    seq: usize,
-    head_dim: usize,
-    theta: f32,
-    device: &Device,
-) -> (Tensor<2>, Tensor<2>) {
+fn rope_tables(seq: usize, head_dim: usize, theta: f32, device: &Device) -> (Tensor<2>, Tensor<2>) {
     let mut cos = vec![0.0f32; seq * head_dim];
     let mut sin = vec![0.0f32; seq * head_dim];
     let half = head_dim / 2;

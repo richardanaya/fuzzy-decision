@@ -115,12 +115,7 @@ impl LayerNorm {
     }
 }
 
-pub fn tensor2(
-    values: Vec<f32>,
-    rows: usize,
-    cols: usize,
-    device: &Device,
-) -> Tensor<2> {
+pub fn tensor2(values: Vec<f32>, rows: usize, cols: usize, device: &Device) -> Tensor<2> {
     Tensor::from_data(TensorData::new(values, [rows, cols]), device)
 }
 
@@ -164,12 +159,7 @@ pub fn rotate_half(x: Tensor<3>) -> Tensor<3> {
     Tensor::cat(vec![x2.neg(), x1], 2)
 }
 
-pub fn attend(
-    q: Tensor<3>,
-    k: Tensor<3>,
-    v: Tensor<3>,
-    scale: f32,
-) -> Tensor<3> {
+pub fn attend(q: Tensor<3>, k: Tensor<3>, v: Tensor<3>, scale: f32) -> Tensor<3> {
     let scores = q.matmul(k.swap_dims(1, 2)) * scale;
     softmax_dim(scores, 2).matmul(v)
 }

@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use burn::tensor::{Device, DeviceKind};
 use burn::tensor::Tensor;
+use burn::tensor::{Device, DeviceKind};
 
 use crate::conformer::AudioTower;
 use crate::head::DecisionHead;
@@ -47,6 +47,10 @@ impl Session {
         }
         let config = D1Config::open(&dir.join("config.json"))
             .map_err(|message| Error::Weights { message })?;
+        // NdArray is deprecated in 0.22 in favor of Flex. The `cpu` feature
+        // stays on NdArray so the real-checkpoint comparison keeps the same
+        // backend the Python parity numbers were measured on.
+        #[allow(deprecated)]
         let device = Device::ndarray();
         Self::open(dir, which, config, device)
     }
